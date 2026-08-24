@@ -59,6 +59,7 @@ export {
   cursor,
   opencode,
   pi,
+  bob,
 } from "./AgentProvider.js";
 export type {
   AgentProvider,
@@ -70,6 +71,7 @@ export type {
   CursorOptions,
   OpenCodeOptions,
   PiOptions,
+  BobOptions,
 } from "./AgentProvider.js";
 export {
   createBindMountSandboxProvider,

@@ -1265,3 +1265,115 @@ export const claudeCode = (
     return undefined;
   },
 });
+
+// ---------------------------------------------------------------------------
+// Bob-Shell agent provider
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse Bob-Shell output lines into Sandcastle events.
+ * Bob-Shell outputs plain text by default, but may also output structured JSON.
+ */
+const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
+  // Try JSON parsing first
+  if (line.startsWith("{")) {
+    try {
+      const obj = JSON.parse(line);
+
+      // Handle text output
+      if (obj.type === "text" && typeof obj.text === "string") {
+        return [{ type: "text", text: obj.text }];
+      }
+
+      // Handle tool calls
+      if (obj.type === "tool_call" && typeof obj.name === "string") {
+        return [
+          {
+            type: "tool_call",
+            name: obj.name,
+            args: typeof obj.args === "string" ? obj.args : "",
+          },
+        ];
+      }
+
+      // Handle result/completion
+      if (obj.type === "result" && typeof obj.result === "string") {
+        return [{ type: "result", result: obj.result }];
+      }
+
+      // Handle session ID if Bob supports it
+      if (obj.type === "session_id" && typeof obj.sessionId === "string") {
+        return [{ type: "session_id", sessionId: obj.sessionId }];
+      }
+    } catch {
+      // Not valid JSON, fall through to plain text handling
+    }
+  }
+
+  // Default: treat as plain text output
+  return [{ type: "text", text: line }];
+};
+
+/** Options for the Bob-Shell agent provider. */
+export interface BobOptions {
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+  /** Bob-Shell model or configuration to use */
+  readonly model?: string;
+}
+
+/**
+ * Bob-Shell agent provider for Sandcastle.
+ *
+ * Bob-Shell is an AI coding assistant that can be integrated with Sandcastle
+ * to run autonomous coding tasks in isolated sandbox environments.
+ *
+ * @example
+ * ```typescript
+ * import { run, bob } from "@ai-hero/sandcastle";
+ * import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+ *
+ * await run({
+ *   agent: bob("default"),
+ *   sandbox: docker(),
+ *   prompt: "Fix the issues in this repository",
+ *   maxIterations: 5,
+ * });
+ * ```
+ */
+export const bob = (model: string, options?: BobOptions): AgentProvider => ({
+  name: "bob",
+  env: options?.env ?? {},
+  captureSessions: false, // Bob doesn't support session capture yet
+
+  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+    // Bob-Shell command structure
+    // Assuming bob accepts input via stdin and outputs to stdout
+    const modelFlag = options?.model
+      ? ` --model ${shellEscape(options.model)}`
+      : "";
+
+    return {
+      command: `bob${modelFlag}`,
+      stdin: prompt,
+    };
+  },
+
+  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+    const args = ["bob"];
+
+    if (options?.model) {
+      args.push("--model", options.model);
+    }
+
+    if (prompt) {
+      args.push(prompt);
+    }
+
+    return args;
+  },
+
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseBobStreamLine(line);
+  },
+});
