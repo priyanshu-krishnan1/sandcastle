@@ -23,16 +23,11 @@ import { SKELETON_PROMPT } from "./templates.js";
 
 const makeDir = () => mkdtemp(join(tmpdir(), "init-service-"));
 
-const claudeCodeAgent = getAgent("claude-code")!;
-const piAgent = getAgent("pi")!;
-const codexAgent = getAgent("codex")!;
-const cursorAgent = getAgent("cursor")!;
-const opencodeAgent = getAgent("opencode")!;
-const copilotAgent = getAgent("copilot")!;
+const bobAgent = getAgent("bob")!;
 
 const defaultOptions: ScaffoldOptions = {
-  agent: claudeCodeAgent,
-  model: "claude-opus-4-8",
+  agent: bobAgent,
+  model: "default",
 };
 
 const runScaffold = (repoDir: string, options?: Partial<ScaffoldOptions>) =>
@@ -63,62 +58,18 @@ describe("InitService scaffold", () => {
 
   // --- Dynamic .env.example generation ---
 
-  it.each([
-    {
-      agent: claudeCodeAgent,
-      expectedKey: "CLAUDE_CODE_OAUTH_TOKEN=",
-      unexpectedKey: "OPENAI_KEY=",
-      expectClaudeSetupTokenHint: true,
-    },
-    {
-      agent: piAgent,
-      expectedKey: "ANTHROPIC_API_KEY=",
-      unexpectedKey: "OPENAI_KEY=",
-      expectClaudeSetupTokenHint: false,
-    },
-    {
-      agent: codexAgent,
-      expectedKey: "OPENAI_KEY=",
-      unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectClaudeSetupTokenHint: false,
-    },
-    {
-      agent: opencodeAgent,
-      expectedKey: "OPENCODE_API_KEY=",
-      unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectClaudeSetupTokenHint: false,
-    },
-    {
-      agent: cursorAgent,
-      expectedKey: "CURSOR_API_KEY=",
-      unexpectedKey: "ANTHROPIC_API_KEY=",
-      expectClaudeSetupTokenHint: false,
-    },
-  ])(
-    "generates .env.example with $agent.name env var",
-    async ({
-      agent,
-      expectedKey,
-      unexpectedKey,
-      expectClaudeSetupTokenHint,
-    }) => {
-      const dir = await makeDir();
-      await runScaffold(dir, { agent, model: agent.defaultModel });
+  it("generates .env.example with bob's env var", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, { agent: bobAgent, model: bobAgent.defaultModel });
 
-      const envExample = await readFile(
-        join(dir, ".sandcastle", ".env.example"),
-        "utf-8",
-      );
-      expect(envExample).toContain(expectedKey);
-      expect(envExample).not.toContain(unexpectedKey);
-      expect(envExample).not.toContain("issues/191");
-      if (expectClaudeSetupTokenHint) {
-        expect(envExample).toContain("claude setup-token");
-      } else {
-        expect(envExample).not.toContain("claude setup-token");
-      }
-    },
-  );
+    const envExample = await readFile(
+      join(dir, ".sandcastle", ".env.example"),
+      "utf-8",
+    );
+    expect(envExample).toContain("BOB_API_KEY=");
+    expect(envExample).not.toContain("issues/191");
+    expect(envExample).not.toContain("claude setup-token");
+  });
 
   it("generates .env.example with GH_TOKEN when issue tracker is github-issues", async () => {
     const dir = await makeDir();
@@ -196,31 +147,21 @@ describe("InitService scaffold", () => {
     expect(dockerfile).toContain(SANDBOX_REPO_DIR);
   });
 
-  it.each([
-    claudeCodeAgent,
-    piAgent,
-    codexAgent,
-    cursorAgent,
-    opencodeAgent,
-    copilotAgent,
-  ])(
-    "$name Dockerfile aligns UID/GID with -o so a host GID colliding with a reserved base-image GID (e.g. macOS staff=20) doesn't fail the build",
-    async (agent) => {
-      const dir = await makeDir();
-      await runScaffold(dir, { agent, model: agent.defaultModel });
+  it("bob Dockerfile aligns UID/GID with -o so a host GID colliding with a reserved base-image GID (e.g. macOS staff=20) doesn't fail the build", async () => {
+    const dir = await makeDir();
+    await runScaffold(dir, { agent: bobAgent, model: bobAgent.defaultModel });
 
-      const dockerfile = await readFile(
-        join(dir, ".sandcastle", "Dockerfile"),
-        "utf-8",
-      );
-      expect(dockerfile).toContain("groupmod -o -g $AGENT_GID node");
-      expect(dockerfile).toContain(
-        "usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node",
-      );
-    },
-  );
+    const dockerfile = await readFile(
+      join(dir, ".sandcastle", "Dockerfile"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain("groupmod -o -g $AGENT_GID node");
+    expect(dockerfile).toContain(
+      "usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node",
+    );
+  });
 
-  it("claude-code Dockerfile template does not install pnpm or enable corepack", async () => {
+  it("bob Dockerfile template does not install pnpm or enable corepack", async () => {
     const dir = await makeDir();
     await runScaffold(dir);
 
@@ -301,15 +242,15 @@ describe("InitService scaffold", () => {
 
   it("scaffolds main.mts with the specified model", async () => {
     const dir = await makeDir();
-    await runScaffold(dir, { model: "claude-sonnet-4-6" });
+    await runScaffold(dir, { model: "custom-mode" });
 
     const mainTs = await readFile(
       join(dir, ".sandcastle", "main.mts"),
       "utf-8",
     );
-    expect(mainTs).toContain('claudeCode("claude-sonnet-4-6")');
+    expect(mainTs).toContain('bob("custom-mode")');
     // Should not contain the template's original model
-    expect(mainTs).not.toContain('claudeCode("claude-opus-4-8")');
+    expect(mainTs).not.toContain('bob("default")');
   });
 
   it("scaffolds main.mts with default model when using agent default", async () => {
@@ -320,7 +261,7 @@ describe("InitService scaffold", () => {
       join(dir, ".sandcastle", "main.mts"),
       "utf-8",
     );
-    expect(mainTs).toContain('claudeCode("claude-opus-4-8")');
+    expect(mainTs).toContain('bob("default")');
   });
 
   // --- Template-specific tests ---
@@ -358,8 +299,6 @@ describe("InitService scaffold", () => {
     expect(mainTs).toContain("run(");
     expect(mainTs).toContain("maxIterations");
     expect(mainTs).toContain("3");
-    // When scaffolded with default model, simple-loop uses claude-opus-4-8
-    // (rewritten from template's claude-sonnet-4-6)
     expect(mainTs).toContain("promptFile");
     expect(mainTs).toContain("npm install");
     expect(mainTs).toContain("onSandboxReady");
@@ -595,7 +534,7 @@ describe("InitService scaffold", () => {
         template,
         mainFilename,
         ghIssues,
-        claudeCodeAgent,
+        bobAgent,
         packageManager,
       );
 
@@ -719,34 +658,13 @@ describe("InitService scaffold", () => {
       );
     });
 
-    it("claude-code agent gets a `claude setup-token` hint under the env-vars step", () => {
+    it("does not mention a claude setup-token hint (bob has no such flow)", () => {
       const blank = next("blank", "main.mts").join("\n");
       const nonBlank = next("simple-loop", "main.mts").join("\n");
-      expect(blank).toContain("claude setup-token");
-      expect(blank).toContain("CLAUDE_CODE_OAUTH_TOKEN");
-      expect(nonBlank).toContain("claude setup-token");
-      expect(nonBlank).toContain("CLAUDE_CODE_OAUTH_TOKEN");
-    });
-
-    it("non-claude-code agents do not get the `claude setup-token` hint", () => {
-      const piLines = getNextStepsLines(
-        "simple-loop",
-        "main.mts",
-        ghIssues,
-        piAgent,
-        "npm",
-      ).join("\n");
-      const codexLines = getNextStepsLines(
-        "blank",
-        "main.mts",
-        ghIssues,
-        codexAgent,
-        "npm",
-      ).join("\n");
-      expect(piLines).not.toContain("claude setup-token");
-      expect(piLines).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
-      expect(codexLines).not.toContain("claude setup-token");
-      expect(codexLines).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(blank).not.toContain("claude setup-token");
+      expect(blank).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+      expect(nonBlank).not.toContain("claude setup-token");
+      expect(nonBlank).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
     });
 
     it("next steps no longer link to the closed issues/191 workaround", () => {
@@ -767,12 +685,12 @@ describe("InitService scaffold", () => {
         "simple-loop",
         "main.mts",
         customManager,
-        claudeCodeAgent,
+        bobAgent,
         "npm",
       );
       const joined = lines.join("\n");
       expect(joined).toContain("SETUP_ISSUE_TRACKER.md");
-      expect(joined).toContain(claudeCodeAgent.setupCommand);
+      expect(joined).toContain(bobAgent.setupCommand);
       // The template-driven steps must not leak into the custom branch.
       expect(joined).not.toContain("npm run sandcastle");
     });
@@ -782,94 +700,13 @@ describe("InitService scaffold", () => {
         "blank",
         "main.mts",
         customManager,
-        getAgent("opencode")!,
+        bobAgent,
         "npm",
       );
       const joined = lines.join("\n");
       expect(joined.toLowerCase()).toContain("host");
-      expect(joined).toContain(getAgent("opencode")!.setupCommand);
+      expect(joined).toContain(bobAgent.setupCommand);
     });
-  });
-
-  it("scaffolds pi agent with pi Dockerfile", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: piAgent, model: "claude-sonnet-4-6" });
-
-    const dockerfile = await readFile(
-      join(dir, ".sandcastle", "Dockerfile"),
-      "utf-8",
-    );
-    expect(dockerfile).toContain("FROM node:22-bookworm");
-    expect(dockerfile).toContain("@mariozechner/pi-coding-agent");
-    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
-  });
-
-  it("scaffolds main.mts with pi factory import when pi agent selected", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: piAgent, model: "claude-sonnet-4-6" });
-
-    const mainTs = await readFile(
-      join(dir, ".sandcastle", "main.mts"),
-      "utf-8",
-    );
-    expect(mainTs).toContain('pi("claude-sonnet-4-6")');
-    expect(mainTs).not.toContain("claudeCode");
-  });
-
-  it("scaffolds codex agent with codex Dockerfile", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: codexAgent, model: "gpt-5.4-mini" });
-
-    const dockerfile = await readFile(
-      join(dir, ".sandcastle", "Dockerfile"),
-      "utf-8",
-    );
-    expect(dockerfile).toContain("FROM node:22-bookworm");
-    expect(dockerfile).toContain("@openai/codex");
-    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
-  });
-
-  it("scaffolds main.mts with codex factory import when codex agent selected", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: codexAgent, model: "gpt-5.4-mini" });
-
-    const mainTs = await readFile(
-      join(dir, ".sandcastle", "main.mts"),
-      "utf-8",
-    );
-    expect(mainTs).toContain('codex("gpt-5.4-mini")');
-    expect(mainTs).not.toContain("claudeCode");
-  });
-
-  it("scaffolds cursor agent with cursor Dockerfile", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: cursorAgent, model: "claude-sonnet-4-6" });
-
-    const dockerfile = await readFile(
-      join(dir, ".sandcastle", "Dockerfile"),
-      "utf-8",
-    );
-    expect(dockerfile).toContain("FROM node:22-bookworm");
-    expect(dockerfile).toContain("cursor.com/install");
-    expect(dockerfile).toContain('ENV PATH="/home/agent/.local/bin:$PATH"');
-    expect(dockerfile).toContain("ARG AGENT_UID=1000");
-    expect(dockerfile).toContain("ARG AGENT_GID=1000");
-    expect(dockerfile).toMatch(
-      /USER \$\{AGENT_UID\}:\$\{AGENT_GID\}[\s\S]*RUN curl https:\/\/cursor\.com\/install -fsS \| bash/,
-    );
-    expect(dockerfile).not.toContain("{{ISSUE_TRACKER_TOOLS}}");
-  });
-
-  it("scaffolds main.mts with cursor factory import when cursor agent selected", async () => {
-    const dir = await makeDir();
-    await runScaffold(dir, { agent: cursorAgent, model: "claude-sonnet-4-6" });
-
-    const mainTs = await readFile(
-      join(dir, ".sandcastle", "main.mts"),
-      "utf-8",
-    );
-    expect(mainTs).toContain('cursor("claude-sonnet-4-6")');
-    expect(mainTs).not.toContain("claudeCode");
   });
 
   // --- createLabel option ---
@@ -1021,8 +858,8 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      // All factory calls should use the specified model (default: claude-opus-4-8)
-      expect(mainTs).toContain("claude-opus-4-8");
+      // All factory calls should use the specified model (default: "default")
+      expect(mainTs).toContain('bob("default")');
     });
 
     it("implement-prompt.md contains {{TASK_ID}}, {{ISSUE_TITLE}}, {{BRANCH}} prompt arguments", async () => {
@@ -1074,8 +911,8 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
-      expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
+      // Dynamic env: bob agent → BOB_API_KEY, default issue tracker → GH_TOKEN
+      expect(envExample).toContain("BOB_API_KEY=");
       expect(envExample).toContain("GH_TOKEN=");
     });
   });
@@ -1261,8 +1098,8 @@ describe("InitService scaffold", () => {
         join(configDir, ".env.example"),
         "utf-8",
       );
-      // Dynamic env: claude-code agent → CLAUDE_CODE_OAUTH_TOKEN, default issue tracker → GH_TOKEN
-      expect(envExample).toContain("CLAUDE_CODE_OAUTH_TOKEN=");
+      // Dynamic env: bob agent → BOB_API_KEY, default issue tracker → GH_TOKEN
+      expect(envExample).toContain("BOB_API_KEY=");
       expect(envExample).toContain("GH_TOKEN=");
     });
 
@@ -1274,7 +1111,7 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      expect(mainTs).toContain("claude-opus-4-8");
+      expect(mainTs).toContain('bob("default")');
     });
 
     it("scaffolds CODING_STANDARDS.md with minimal starter content", async () => {
@@ -1411,34 +1248,11 @@ describe("InitService scaffold", () => {
   });
 
   describe("Agent setupCommand", () => {
-    it.each([
-      {
-        name: "claude-code",
-        command: `claude "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
-      },
-      {
-        name: "codex",
-        command: `codex "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
-      },
-      {
-        name: "cursor",
-        command: `agent "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
-      },
-      { name: "pi", command: `pi "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"` },
-      {
-        name: "opencode",
-        command: `opencode --prompt "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
-      },
-      {
-        name: "copilot",
-        command: `copilot -i "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
-      },
-    ])(
-      "$name has the expected interactive setupCommand",
-      ({ name, command }) => {
-        expect(getAgent(name)!.setupCommand).toBe(command);
-      },
-    );
+    it("bob has the expected interactive setupCommand", () => {
+      expect(getAgent("bob")!.setupCommand).toBe(
+        `bob run "$(cat .sandcastle/SETUP_ISSUE_TRACKER.md)"`,
+      );
+    });
   });
 
   describe("Issue tracker scaffold", () => {
@@ -2152,11 +1966,11 @@ describe("InitService scaffold", () => {
       expect(containerfile).toContain("dpkg-architecture -qDEB_HOST_MULTIARCH");
     });
 
-    it("scaffold with beads + pi agent produces Dockerfile with beads install and pi agent", async () => {
+    it("scaffold with beads + bob agent produces Dockerfile with beads install and bob agent", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
-        agent: piAgent,
-        model: "claude-sonnet-4-6",
+        agent: bobAgent,
+        model: "default",
         issueTracker: getIssueTracker("beads"),
       });
 
@@ -2165,7 +1979,7 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(dockerfile).toContain("beads");
-      expect(dockerfile).toContain("@mariozechner/pi-coding-agent");
+      expect(dockerfile).toContain("bob.ibm.com");
       expect(dockerfile).not.toContain("GitHub CLI");
     });
   });
@@ -2243,23 +2057,23 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(mainContent).toContain("@ai-hero/sandcastle");
-      expect(mainContent).toContain('claudeCode("claude-opus-4-8")');
+      expect(mainContent).toContain('bob("default")');
     });
 
-    it("main.ts scaffolded with type: module rewrites agent factory correctly", async () => {
+    it("main.ts scaffolded with type: module rewrites the model correctly", async () => {
       const dir = await makeDir();
       await writeFile(
         join(dir, "package.json"),
         JSON.stringify({ name: "test", type: "module" }),
       );
-      await runScaffold(dir, { agent: piAgent, model: "claude-sonnet-4-6" });
+      await runScaffold(dir, { agent: bobAgent, model: "custom-mode" });
 
       const mainContent = await readFile(
         join(dir, ".sandcastle", "main.ts"),
         "utf-8",
       );
-      expect(mainContent).toContain('pi("claude-sonnet-4-6")');
-      expect(mainContent).not.toContain("claudeCode");
+      expect(mainContent).toContain('bob("custom-mode")');
+      expect(mainContent).not.toContain('bob("default")');
     });
 
     it("comments in scaffolded main.ts reference main.ts, not main.mts", async () => {
@@ -2339,7 +2153,14 @@ describe("InitService scaffold", () => {
       ).rejects.toThrow();
     });
 
-    it("selecting podman rewrites the main file to import and call podman", async () => {
+    // Templates use fyre() as their runtime sandbox regardless of which
+    // scaffold sandboxProvider (docker/podman) is selected — that choice only
+    // controls which container config file gets written (Dockerfile vs
+    // Containerfile) for users building their own image externally. There is
+    // no more "docker" placeholder text in the templates for rewriteMainTs to
+    // find-and-replace, since the package no longer ships a docker() sandbox
+    // factory to call at runtime.
+    it("selecting podman does not rewrite the main file's sandbox factory", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { sandboxProvider: podmanProvider });
 
@@ -2348,29 +2169,13 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(mainTs).toContain(
-        'import { podman } from "@ai-hero/sandcastle/sandboxes/podman"',
+        'import { run, bob, fyre } from "@ai-hero/sandcastle"',
       );
-      expect(mainTs).toContain("sandbox: podman()");
-      expect(mainTs).not.toContain("docker");
+      expect(mainTs).toContain("fyre(");
+      expect(mainTs).not.toContain("podman");
     });
 
-    it("selecting podman rewrites every docker() call site", async () => {
-      const dir = await makeDir();
-      await runScaffold(dir, {
-        sandboxProvider: podmanProvider,
-        templateName: "parallel-planner",
-      });
-
-      const mainTs = await readFile(
-        join(dir, ".sandcastle", "main.mts"),
-        "utf-8",
-      );
-      expect(mainTs).not.toContain("docker");
-      // parallel-planner calls the factory three times
-      expect(mainTs.match(/sandbox: podman\(\)/g)).toHaveLength(3);
-    });
-
-    it("selecting docker leaves the main file importing and calling docker", async () => {
+    it("selecting docker does not rewrite the main file's sandbox factory", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { sandboxProvider: dockerProvider });
 
@@ -2379,12 +2184,9 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(mainTs).toContain(
-        'import { run, claudeCode } from "@ai-hero/sandcastle"',
+        'import { run, bob, fyre } from "@ai-hero/sandcastle"',
       );
-      expect(mainTs).toContain(
-        'import { docker } from "@ai-hero/sandcastle/sandboxes/docker"',
-      );
-      expect(mainTs).toContain("sandbox: docker()");
+      expect(mainTs).toContain("fyre(");
     });
   });
 });

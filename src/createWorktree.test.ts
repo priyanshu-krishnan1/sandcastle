@@ -1,15 +1,8 @@
 import { exec, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { createWorktree } from "./createWorktree.js";
@@ -19,7 +12,7 @@ import type {
   WorktreeInteractiveOptions,
   WorktreeCreateSandboxOptions,
 } from "./createWorktree.js";
-import { claudeCode, codex } from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 import {
   createBindMountSandboxProvider,
   type BindMountSandboxHandle,
@@ -27,7 +20,6 @@ import {
   type ExecResult,
   type SandboxProvider,
 } from "./SandboxProvider.js";
-import { encodeProjectPath } from "./SessionStore.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 
 const execAsync = promisify(exec);
@@ -347,7 +339,7 @@ describe("worktree.interactive()", () => {
 
     try {
       const result = await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test prompt",
       });
@@ -380,7 +372,7 @@ describe("worktree.interactive()", () => {
 
     try {
       const result = await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "fix the bug",
       });
@@ -414,7 +406,7 @@ describe("worktree.interactive()", () => {
 
     try {
       await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "add a file",
       });
@@ -455,7 +447,7 @@ describe("worktree.interactive()", () => {
 
       await expect(
         ws.interactive({
-          agent: claudeCode("claude-opus-4-8"),
+          agent: bob("default"),
           sandbox: provider,
           prompt: "test prompt",
           signal: ac.signal,
@@ -488,7 +480,7 @@ describe("worktree.interactive()", () => {
       // First call: aborted
       await expect(
         ws.interactive({
-          agent: claudeCode("claude-opus-4-8"),
+          agent: bob("default"),
           sandbox: provider,
           prompt: "test",
           signal: ac.signal,
@@ -500,7 +492,7 @@ describe("worktree.interactive()", () => {
 
       // Handle still usable
       const result = await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test again",
       });
@@ -513,7 +505,7 @@ describe("worktree.interactive()", () => {
 
   it("signal option has correct type on WorktreeInteractiveOptions", () => {
     const _options: WorktreeInteractiveOptions = {
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       prompt: "test",
       signal: new AbortController().signal,
     };
@@ -539,7 +531,7 @@ describe("worktree.interactive()", () => {
 
     try {
       const result = await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
       });
@@ -555,38 +547,15 @@ describe("worktree.interactive()", () => {
   });
 });
 
-/** Format a mock agent result as stream-json lines (mimicking Claude's output) */
+/** Format a mock agent result as bob's stream-json lines. */
 const toStreamJson = (output: string): string => {
   const lines: string[] = [];
   lines.push(
-    JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: output }] },
-    }),
+    JSON.stringify({ type: "message", role: "assistant", content: output }),
   );
-  lines.push(JSON.stringify({ type: "result", result: output }));
-  return lines.join("\n");
-};
-
-/**
- * Format a mock codex result as JSON stream lines including a `turn.completed`
- * usage event so the Orchestrator surfaces usage via `streamUsage`.
- */
-const toCodexStreamJsonWithUsage = (
-  output: string,
-  usage: {
-    input_tokens: number;
-    cached_input_tokens: number;
-    output_tokens: number;
-  },
-): string => {
-  const lines: string[] = [
-    JSON.stringify({
-      type: "item.completed",
-      item: { type: "agent_message", text: output },
-    }),
-    JSON.stringify({ type: "turn.completed", usage }),
-  ];
+  lines.push(
+    JSON.stringify({ type: "result", status: "success", result: output }),
+  );
   return lines.join("\n");
 };
 
@@ -613,24 +582,12 @@ describe("worktree.run()", () => {
             },
           ): Promise<ExecResult> => {
             const cwd = execOptions?.cwd ?? options.worktreePath;
-            // Intercept agent commands
-            if (command.startsWith("claude ")) {
+            // Intercept the bob agent command. bob's actual command is a long
+            // install-check preamble ending in `bob run --format
+            // stream-json`, so matching uses `.includes()`, not `.startsWith()`.
+            if (command.includes("bob run")) {
               const output = await mockAgentBehavior(cwd);
               const streamOutput = toStreamJson(output);
-              if (execOptions?.onLine) {
-                for (const line of streamOutput.split("\n")) {
-                  execOptions.onLine(line);
-                }
-              }
-              return { stdout: streamOutput, stderr: "", exitCode: 0 };
-            }
-            if (command.startsWith("codex ")) {
-              const output = await mockAgentBehavior(cwd);
-              const streamOutput = toCodexStreamJsonWithUsage(output, {
-                input_tokens: 50000,
-                cached_input_tokens: 0,
-                output_tokens: 100,
-              });
               if (execOptions?.onLine) {
                 for (const line of streamOutput.split("\n")) {
                   execOptions.onLine(line);
@@ -668,7 +625,7 @@ describe("worktree.run()", () => {
 
     try {
       const result = await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "do something",
         maxIterations: 1,
@@ -684,175 +641,6 @@ describe("worktree.run()", () => {
     }
   });
 
-  it("emits 'Context window: NNNk' line when an iteration has usage", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "ws-run-ctxwin-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "init.txt", "init", "initial commit");
-    const logPath = join(hostDir, "ctxwin.log");
-
-    const sandbox = makeRunTestProvider();
-
-    const ws = await createWorktree({
-      branchStrategy: { type: "branch", branch: "ctxwin-test" },
-      cwd: hostDir,
-    });
-
-    try {
-      const result = await ws.run({
-        agent: codex("gpt-test"),
-        sandbox,
-        prompt: "do something",
-        maxIterations: 1,
-        logging: { type: "file", path: logPath },
-      });
-
-      // Sanity-check: orchestrator surfaced usage on the iteration.
-      expect(result.iterations[0]!.usage).toBeDefined();
-
-      const log = await readFile(logPath, "utf-8");
-      expect(log).toContain("Context window: 50k");
-    } finally {
-      await ws.close();
-      await rm(hostDir, { recursive: true, force: true });
-    }
-  });
-
-  it("captures Claude session and emits 'Context window' from parsed usage (regression: #717)", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "ws-run-claude-cap-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "ws-run-claude-host-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "ws-run-claude-sb-projects-"),
-    );
-    await initRepo(hostDir);
-    await commitFile(hostDir, "init.txt", "init", "initial commit");
-    const logPath = join(hostDir, "ctxwin.log");
-    const mockSessionId = "wsrun-claude-cap-1";
-
-    // Bind-mount provider whose handle exposes filesystem-backed copyFileIn/
-    // copyFileOut so AgentSessionStorage.captureToHost works. The exec layer
-    // intercepts `claude ...`, writes a fake session JSONL into the sandbox's
-    // projects directory, and streams a stub session_id.
-    const sandbox = createBindMountSandboxProvider({
-      name: "test-claude-cap",
-      create: async (options) => {
-        const handle: BindMountSandboxHandle = {
-          worktreePath: options.worktreePath,
-          exec: async (command, execOptions) => {
-            const cwd = execOptions?.cwd ?? options.worktreePath;
-            if (command.startsWith("claude ")) {
-              const encoded = encodeProjectPath(cwd);
-              const sessionsDir = join(sandboxProjectsDir, encoded);
-              await mkdir(sessionsDir, { recursive: true });
-              await writeFile(
-                join(sessionsDir, `${mockSessionId}.jsonl`),
-                [
-                  JSON.stringify({
-                    type: "system",
-                    subtype: "init",
-                    session_id: mockSessionId,
-                    cwd,
-                  }),
-                  JSON.stringify({
-                    type: "assistant",
-                    message: {
-                      model: "claude-opus-4-8",
-                      usage: {
-                        input_tokens: 50000,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        output_tokens: 100,
-                      },
-                    },
-                    cwd,
-                  }),
-                ].join("\n"),
-              );
-              const streamLines = [
-                JSON.stringify({
-                  type: "system",
-                  subtype: "init",
-                  session_id: mockSessionId,
-                }),
-                JSON.stringify({
-                  type: "assistant",
-                  message: { content: [{ type: "text", text: "ok" }] },
-                }),
-                JSON.stringify({ type: "result", result: "ok" }),
-              ].join("\n");
-              if (execOptions?.onLine) {
-                for (const line of streamLines.split("\n")) {
-                  execOptions.onLine(line);
-                }
-              }
-              return { stdout: streamLines, stderr: "", exitCode: 0 };
-            }
-            try {
-              const result = execSync(command, {
-                cwd,
-                encoding: "utf-8",
-                stdio: ["pipe", "pipe", "pipe"],
-              });
-              return { stdout: result, stderr: "", exitCode: 0 };
-            } catch (e: any) {
-              return {
-                stdout: e?.stdout?.toString() ?? "",
-                stderr: e?.stderr?.toString() ?? "",
-                exitCode:
-                  typeof e?.status === "number" && e.status !== null
-                    ? e.status
-                    : 1,
-              };
-            }
-          },
-          copyFileIn: async (hostPath, sandboxPath) => {
-            await mkdir(dirname(sandboxPath), { recursive: true });
-            await copyFile(hostPath, sandboxPath);
-          },
-          copyFileOut: async (sandboxPath, hostPath) => {
-            await mkdir(dirname(hostPath), { recursive: true });
-            await copyFile(sandboxPath, hostPath);
-          },
-          close: async () => {},
-        };
-        return handle;
-      },
-    });
-
-    const ws = await createWorktree({
-      branchStrategy: { type: "branch", branch: "ctxwin-claude-test" },
-      cwd: hostDir,
-    });
-
-    try {
-      const result = await ws.run({
-        agent: claudeCode("test-model", {
-          sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-        }),
-        sandbox,
-        prompt: "do something",
-        maxIterations: 1,
-        logging: { type: "file", path: logPath },
-      });
-
-      expect(result.iterations[0]!.usage).toEqual({
-        inputTokens: 50000,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: 0,
-        outputTokens: 100,
-      });
-      expect(result.iterations[0]!.sessionFilePath).toBeDefined();
-
-      const log = await readFile(logPath, "utf-8");
-      expect(log).toContain("Context window: 50k");
-    } finally {
-      await ws.close();
-      await rm(hostDir, { recursive: true, force: true });
-      await rm(hostProjectsDir, { recursive: true, force: true });
-      await rm(sandboxProjectsDir, { recursive: true, force: true });
-    }
-  });
 
   it("worktree persists after run completes", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "ws-run-"));
@@ -873,7 +661,7 @@ describe("worktree.run()", () => {
 
     try {
       await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "create a file",
         maxIterations: 1,
@@ -912,7 +700,7 @@ describe("worktree.run()", () => {
 
     try {
       const result = await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "create a file",
         maxIterations: 1,
@@ -950,7 +738,7 @@ describe("worktree.run()", () => {
 
     try {
       const result = await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "create a file",
         maxIterations: 1,
@@ -1007,7 +795,7 @@ describe("worktree.run()", () => {
 
     try {
       await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "first",
         maxIterations: 1,
@@ -1016,7 +804,7 @@ describe("worktree.run()", () => {
       // Second run() reuses the same worktree handle — the source branch must
       // still exist on disk for the iteration to find HEAD inside the sandbox.
       await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "second",
         maxIterations: 1,
@@ -1036,7 +824,7 @@ describe("worktree.run()", () => {
   it("sandbox is required (type error if omitted)", () => {
     // This test validates at the type level — sandbox is required in WorktreeRunOptions
     const _options = {
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       prompt: "test",
       // @ts-expect-error — sandbox is required
     } satisfies WorktreeRunOptions;
@@ -1064,7 +852,7 @@ describe("worktree.run()", () => {
 
       await expect(
         ws.run({
-          agent: claudeCode("claude-opus-4-8"),
+          agent: bob("default"),
           sandbox,
           prompt: "do something",
           signal: ac.signal,
@@ -1099,7 +887,7 @@ describe("worktree.run()", () => {
     try {
       await expect(
         ws.run({
-          agent: claudeCode("claude-opus-4-8"),
+          agent: bob("default"),
           sandbox,
           prompt: "do something",
           signal: ac.signal,
@@ -1133,7 +921,7 @@ describe("worktree.run()", () => {
       // First call: aborted
       await expect(
         ws.run({
-          agent: claudeCode("claude-opus-4-8"),
+          agent: bob("default"),
           sandbox,
           prompt: "do something",
           signal: ac.signal,
@@ -1142,7 +930,7 @@ describe("worktree.run()", () => {
 
       // Second call: should succeed without signal
       const result = await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox,
         prompt: "do something else",
       });
@@ -1157,7 +945,7 @@ describe("worktree.run()", () => {
 
   it("signal option has the correct type on WorktreeRunOptions", () => {
     const _options: WorktreeRunOptions = {
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: testSandbox,
       prompt: "test",
       signal: new AbortController().signal,

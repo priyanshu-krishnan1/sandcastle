@@ -10,7 +10,6 @@ import { Display } from "./Display.js";
 import {
   scaffold,
   listTemplates,
-  listAgents,
   getAgent,
   listIssueTrackers,
   getIssueTracker,
@@ -23,7 +22,6 @@ import {
   getTemplateDependencies,
 } from "./InitService.js";
 import type {
-  AgentEntry,
   IssueTrackerEntry,
   SandboxProviderEntry,
 } from "./InitService.js";
@@ -60,20 +58,15 @@ const templateOption = Options.text("template").pipe(
   Options.optional,
 );
 
-const agentOption = Options.text("agent").pipe(
-  Options.withDescription("Agent to use (e.g. claude-code)"),
-  Options.optional,
-);
-
 const initModelOption = Options.text("model").pipe(
   Options.withDescription(
-    "Model to use for the agent (e.g. claude-sonnet-4-6). Defaults to the agent's default model",
+    "Model/mode to use for bob. Defaults to bob's default model",
   ),
   Options.optional,
 );
 
 const sandboxOption = Options.text("sandbox").pipe(
-  Options.withDescription("Sandbox provider to use (e.g. fyre, no-sandbox)"),
+  Options.withDescription("Sandbox provider to use (e.g. docker, podman)"),
   Options.optional,
 );
 
@@ -120,7 +113,6 @@ const initCommand = Command.make(
   "init",
   {
     template: templateOption,
-    agent: agentOption,
     model: initModelOption,
     sandbox: sandboxOption,
     issueTracker: issueTrackerOption,
@@ -129,7 +121,6 @@ const initCommand = Command.make(
   },
   ({
     template,
-    agent: agentFlag,
     model: modelFlag,
     sandbox: sandboxFlag,
     issueTracker: issueTrackerFlag,
@@ -221,42 +212,8 @@ const initCommand = Command.make(
           return confirmed === true;
         });
 
-      // Resolve agent: CLI flag > interactive select
-      const agents = listAgents();
-      let selectedAgent: AgentEntry;
-      if (agentFlag._tag === "Some") {
-        const entry = getAgent(agentFlag.value);
-        if (!entry) {
-          const names = agents.map((a) => a.name).join(", ");
-          yield* Effect.fail(
-            new InitError({
-              message: `Unknown agent "${agentFlag.value}". Available: ${names}`,
-            }),
-          );
-        }
-        selectedAgent = entry!;
-      } else {
-        if (!isInteractive) {
-          yield* failIfNonInteractive("--agent");
-        }
-        const selected = yield* Effect.promise(() =>
-          clack.select({
-            message: "Select an agent:",
-            initialValue: "claude-code",
-            options: agents.map((a) => ({
-              value: a.name,
-              label: a.label,
-              hint: `Default model: ${a.defaultModel}`,
-            })),
-          }),
-        );
-        if (clack.isCancel(selected)) {
-          yield* Effect.fail(
-            new InitError({ message: "Agent selection cancelled." }),
-          );
-        }
-        selectedAgent = getAgent(selected as string)!;
-      }
+      // bob is the only supported agent — no flag or picker needed.
+      const selectedAgent = getAgent("bob")!;
 
       // Resolve model: CLI flag > agent default
       const selectedModel =

@@ -18,9 +18,8 @@ export interface AgentCommandOptions {
   readonly resumeSession?: string;
   /**
    * When true alongside `resumeSession`, the agent should fork the session
-   * instead of mutating it — Claude's `--fork-session`, Codex's
-   * `codex exec fork`. The parent session JSONL is left intact and the agent
-   * writes a new session under a fresh id.
+   * instead of mutating it. The parent session JSONL is left intact and the
+   * agent writes a new session under a fresh id.
    */
   readonly forkSession?: boolean;
 }
@@ -76,18 +75,16 @@ export interface AgentProvider {
   readonly name: string;
   /** Environment variables injected by this agent provider. Merged at launch time with env resolver and sandbox provider env. */
   readonly env: Record<string, string>;
-  /** When true, session capture is enabled for this provider. Default: true for Claude Code, false for others. */
+  /** When true, session capture is enabled for this provider. */
   readonly captureSessions: boolean;
   /** Provider-owned storage and transfer behavior for resumable agent sessions. */
   readonly sessionStorage?: AgentSessionStorage;
   buildPrintCommand(options: AgentCommandOptions): PrintCommand;
   buildInteractiveArgs?(options: AgentCommandOptions): string[];
   parseStreamLine(line: string): ParsedStreamEvent[];
-  /** Parse token usage from the captured session JSONL content. Only implemented by Claude Code. */
+  /** Parse token usage from the captured session JSONL content. */
   parseSessionUsage?(content: string): IterationUsage | undefined;
 }
-
-export const DEFAULT_MODEL = "claude-opus-4-8";
 
 // ---------------------------------------------------------------------------
 // Bob-Shell agent provider
@@ -112,17 +109,39 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
         return [{ type: "text", text: obj.content }];
       }
 
+      // A "message" event with any other role (e.g. "user" — bob echoing the
+      // prompt it was given back on the stream) must be dropped, not fall
+      // through to the raw-JSON-as-text default below. The prompt text itself
+      // routinely contains the literal completion signal (it's the
+      // instruction telling the agent when to emit it), so echoing it back
+      // as a "text" event would let the signal-matching in Orchestrator.ts
+      // fire before the agent ever said anything.
+      if (obj.type === "message") {
+        return [];
+      }
+
       if (obj.type === "result") {
         if (obj.status === "success") {
+          if (typeof obj.result === "string") {
+            return [
+              { type: "text", text: obj.result },
+              { type: "result", result: obj.result },
+            ];
+          }
           // bob run --format stream-json emits {"type":"result","status":"success","stats":{...}}
-          // with no text content. Synthesise a result event so the orchestrator
-          // records completion, and also emit the completion signal as a text chunk
-          // so the signal-matching logic in Orchestrator.ts triggers correctly.
-          const resultText = typeof obj.result === "string" ? obj.result : "<promise>COMPLETE</promise>";
-          return [
-            { type: "text", text: resultText },
-            { type: "result", result: resultText },
-          ];
+          // with no text content — this only means the CLI process/turn exited
+          // cleanly, not that the agent actually asserted completion. Do NOT
+          // fabricate the completion signal here: a bare process exit (e.g. a
+          // stray backgrounded child holding stdout open, or the agent simply
+          // running out of things to do this turn) would otherwise be
+          // indistinguishable from the agent genuinely emitting
+          // <promise>COMPLETE</promise>, causing Orchestrator.ts to report the
+          // iteration — and any phase gated on it — as successfully complete
+          // even though the actual task was never finished or verified.
+          // Emit nothing; the real signal-matching logic in Orchestrator.ts
+          // only fires if the agent's own assistant-message text already
+          // contains the completion signal.
+          return [];
         }
         // error status — surface as plain text so it appears in logs
         if (obj.status === "error") {

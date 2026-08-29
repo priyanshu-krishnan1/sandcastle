@@ -43,18 +43,17 @@ import {
   type ExecResult,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
-import { claudeCode } from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 
 /** Format a minimal stream-json response so the orchestrator parses agent output. */
 const toStreamJson = (output: string): string => {
   const lines: string[] = [];
   lines.push(
-    JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: output }] },
-    }),
+    JSON.stringify({ type: "message", role: "assistant", content: output }),
   );
-  lines.push(JSON.stringify({ type: "result", result: output }));
+  lines.push(
+    JSON.stringify({ type: "result", status: "success", result: output }),
+  );
   return lines.join("\n");
 };
 
@@ -88,7 +87,7 @@ const makeRunProvider = () =>
             sudo?: boolean;
           },
         ): Promise<ExecResult> => {
-          if (command.startsWith("claude ")) {
+          if (command.includes("bob run")) {
             const stream = toStreamJson("done");
             if (execOptions?.onLine) {
               for (const line of stream.split("\n")) execOptions.onLine(line);
@@ -146,7 +145,7 @@ describe("createWorktree() Windows mount patching", () => {
 
     try {
       await ws.interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
       });
@@ -178,7 +177,7 @@ describe("createWorktree() Windows mount patching", () => {
 
     try {
       await ws.run({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         logging: { type: "stdout" },

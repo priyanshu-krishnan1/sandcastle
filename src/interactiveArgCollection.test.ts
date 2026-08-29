@@ -19,7 +19,7 @@ import {
   type BindMountSandboxHandle,
   type InteractiveExecOptions,
 } from "./SandboxProvider.js";
-import { claudeCode } from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 
 describe("interactive arg collection", () => {
   let hostDir: string;
@@ -93,7 +93,7 @@ describe("interactive arg collection", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt("Fix bug in {{COMPONENT}}"),
     });
@@ -116,7 +116,7 @@ describe("interactive arg collection", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt("Fix bug in {{COMPONENT}}"),
       promptArgs: { COMPONENT: "LoginForm" },
@@ -131,7 +131,7 @@ describe("interactive arg collection", () => {
     const provider = makeTestProvider(async () => ({ exitCode: 0 }));
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt("A plain prompt with no placeholders"),
     });
@@ -143,7 +143,7 @@ describe("interactive arg collection", () => {
     const provider = makeTestProvider(async () => ({ exitCode: 0 }));
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt(
         "Branch {{SOURCE_BRANCH}} target {{TARGET_BRANCH}}",
@@ -163,7 +163,7 @@ describe("interactive arg collection", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt("Fix {{COMPONENT}} issue #{{ISSUE_NUM}}"),
     });
@@ -192,7 +192,7 @@ describe("interactive arg collection", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: writePrompt("Fix {{COMPONENT}} issue #{{ISSUE_NUM}}"),
       promptArgs: { COMPONENT: "LoginForm" },

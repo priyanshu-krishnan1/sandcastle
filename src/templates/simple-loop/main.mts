@@ -1,5 +1,4 @@
-import { run, claudeCode } from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { run, bob, fyre } from "@ai-hero/sandcastle";
 
 // Simple loop: an agent that picks open issues one by one and closes them.
 // Run this with: npx tsx .sandcastle/main.mts
@@ -9,13 +8,13 @@ await run({
   // A name for this run, shown as a prefix in log output.
   name: "worker",
 
-  // Sandbox provider — runs the agent inside an isolated container.
-  sandbox: docker(),
+  // Sandbox provider — runs the agent over SSH on a remote host. Replace
+  // with your own SSH-reachable host.
+  sandbox: fyre({ host: "your-host.example.com" }),
 
-  // The agent provider. Pass a model string to claudeCode() — sonnet balances
-  // capability and speed for most tasks. Switch to claude-opus-4-8 for harder
-  // problems, or claude-haiku-4-5-20251001 for speed.
-  agent: claudeCode("claude-sonnet-4-6"),
+  // The agent provider. bob("default") uses Bob-Shell's default model —
+  // pass a specific model/mode string to bob() to override it.
+  agent: bob("default"),
 
   // Path to the prompt file. Shell expressions inside are evaluated inside the
   // sandbox at the start of each iteration, so the agent always sees fresh data.

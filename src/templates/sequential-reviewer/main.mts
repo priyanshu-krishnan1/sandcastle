@@ -1,10 +1,10 @@
 // Sequential Reviewer — implement-then-review loop
 //
 // This template drives a two-phase workflow per issue:
-//   Phase 1 (Implement): A sonnet agent picks an open issue, works on it
+//   Phase 1 (Implement): An agent picks an open issue, works on it
 //                        on a dedicated branch, commits the changes, and signals
 //                        completion.
-//   Phase 2 (Review):    A second sonnet agent reviews the branch diff and either
+//   Phase 2 (Review):    A second agent reviews the branch diff and either
 //                        approves it or makes corrections directly on the branch.
 //
 // Both phases share a single sandbox created via createSandbox(), so the
@@ -22,7 +22,6 @@
 //   "scripts": { "sandcastle": "npx tsx .sandcastle/main.mts" }
 
 import * as sandcastle from "@ai-hero/sandcastle";
-import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -55,9 +54,10 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
   // Create a single sandbox that both the implementer and reviewer share.
   // This gives both agents a real, named branch that persists across phases.
+  // Runs over SSH on a remote host — replace with your own SSH-reachable host.
   const sandbox = await sandcastle.createSandbox({
     branch,
-    sandbox: docker(),
+    sandbox: sandcastle.fyre({ host: "your-host.example.com" }),
     hooks,
     copyToWorktree,
   });
@@ -66,7 +66,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     // -----------------------------------------------------------------------
     // Phase 1: Implement
     //
-    // A sonnet agent picks the next open issue, writes the
+    // An agent picks the next open issue, writes the
     // implementation (using RGR: Red → Green → Repeat → Refactor), and
     // commits the result.
     //
@@ -79,7 +79,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     const implement = await sandbox.run({
       name: "implementer",
       maxIterations: 1,
-      agent: sandcastle.claudeCode("claude-sonnet-4-6"),
+      agent: sandcastle.bob("default"),
       promptFile: "./.sandcastle/implement-prompt.md",
     });
 
@@ -96,14 +96,14 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     // -----------------------------------------------------------------------
     // Phase 2: Review
     //
-    // A second sonnet agent reviews the diff of the branch produced by
+    // A second agent reviews the diff of the branch produced by
     // Phase 1. It uses the {{BRANCH}} prompt argument to inspect the right
     // branch, and either approves or makes corrections directly on the branch.
     // -----------------------------------------------------------------------
     await sandbox.run({
       name: "reviewer",
       maxIterations: 1,
-      agent: sandcastle.claudeCode("claude-sonnet-4-6"),
+      agent: sandcastle.bob("default"),
       promptFile: "./.sandcastle/review-prompt.md",
       promptArgs: {
         BRANCH: branch,

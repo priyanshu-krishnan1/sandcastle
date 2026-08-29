@@ -42,7 +42,7 @@ import {
   type BindMountSandboxHandle,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
-import { claudeCode } from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 
 /** A bind-mount provider whose handle executes commands on the host worktree. */
 const makeInteractiveProvider = () =>
@@ -96,7 +96,7 @@ describe("interactive() Windows mount patching", () => {
     const provider = makeInteractiveProvider();
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       cwd: hostDir,
@@ -121,7 +121,7 @@ describe("interactive() Windows mount patching", () => {
     const provider = makeInteractiveProvider();
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       cwd: hostDir,

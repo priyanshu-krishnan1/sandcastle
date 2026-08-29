@@ -9,73 +9,7 @@ import {
   type BindMountSandboxHandle,
   type InteractiveExecOptions,
 } from "./SandboxProvider.js";
-import { claudeCode, pi, codex, opencode } from "./AgentProvider.js";
-
-// --- buildInteractiveArgs prompt tests ---
-
-const interactiveOpts = (prompt: string) => ({
-  prompt,
-  dangerouslySkipPermissions: true,
-});
-
-describe("buildInteractiveArgs with prompts", () => {
-  it("claudeCode includes prompt as positional argument", () => {
-    const provider = claudeCode("claude-opus-4-8");
-    const args = provider.buildInteractiveArgs!(interactiveOpts("fix the bug"));
-    expect(args[0]).toBe("claude");
-    expect(args[args.length - 1]).toBe("fix the bug");
-  });
-
-  it("claudeCode omits prompt when empty string", () => {
-    const provider = claudeCode("claude-opus-4-8");
-    const args = provider.buildInteractiveArgs!(interactiveOpts(""));
-    expect(args[args.length - 1]).not.toBe("");
-    expect(args).toContain("--model");
-  });
-
-  it("pi includes prompt as positional argument", () => {
-    const provider = pi("claude-sonnet-4-6");
-    const args = provider.buildInteractiveArgs!(interactiveOpts("fix the bug"));
-    expect(args[0]).toBe("pi");
-    expect(args[args.length - 1]).toBe("fix the bug");
-  });
-
-  it("pi omits prompt when empty string", () => {
-    const provider = pi("claude-sonnet-4-6");
-    const args = provider.buildInteractiveArgs!(interactiveOpts(""));
-    expect(args).not.toContain("");
-  });
-
-  it("codex includes prompt as positional argument", () => {
-    const provider = codex("gpt-5.4-mini");
-    const args = provider.buildInteractiveArgs!(interactiveOpts("fix the bug"));
-    expect(args[0]).toBe("codex");
-    expect(args[args.length - 1]).toBe("fix the bug");
-  });
-
-  it("codex omits prompt when empty string", () => {
-    const provider = codex("gpt-5.4-mini");
-    const args = provider.buildInteractiveArgs!(interactiveOpts(""));
-    expect(args).not.toContain("");
-  });
-
-  it("opencode passes prompt via --prompt flag", () => {
-    const provider = opencode("opencode/big-pickle");
-    const args = provider.buildInteractiveArgs!(interactiveOpts("fix the bug"));
-    expect(args[0]).toBe("opencode");
-    const pIdx = args.indexOf("--prompt");
-    expect(pIdx).toBeGreaterThan(-1);
-    expect(args[pIdx + 1]).toBe("fix the bug");
-    expect(args).not.toContain("-p");
-  });
-
-  it("opencode omits --prompt flag when prompt is empty", () => {
-    const provider = opencode("opencode/big-pickle");
-    const args = provider.buildInteractiveArgs!(interactiveOpts(""));
-    expect(args).not.toContain("--prompt");
-    expect(args).not.toContain("-p");
-  });
-});
+import { bob } from "./AgentProvider.js";
 
 // --- interactive() function tests ---
 
@@ -145,7 +79,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test prompt",
       name: "test-session",
@@ -168,14 +102,14 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "fix the login bug",
     });
 
-    // Claude Code's buildInteractiveArgs should include the prompt
+    // bob's buildInteractiveArgs should include the prompt
     expect(receivedArgs).toContain("fix the login bug");
-    expect(receivedArgs[0]).toBe("claude");
+    expect(receivedArgs[0]).toBe("bob");
   });
 
   it("collects commits made during the interactive session", async () => {
@@ -189,7 +123,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "add a file",
     });
@@ -204,7 +138,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
     });
@@ -234,7 +168,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
       }),
@@ -259,7 +193,7 @@ describe("interactive()", () => {
     // but head strategy is not supported
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: isolatedProvider,
         prompt: "test",
         branchStrategy: { type: "head" },
@@ -276,7 +210,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
     });
@@ -299,13 +233,13 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
     });
 
     expect(result.exitCode).toBe(0);
     // Should have called interactiveExec with args from buildInteractiveArgs (empty prompt)
-    expect(receivedArgs[0]).toBe("claude");
+    expect(receivedArgs[0]).toBe("bob");
     // Prompt should not appear in args (empty string is omitted by buildInteractiveArgs)
     expect(receivedArgs[receivedArgs.length - 1]).not.toBe("");
   });
@@ -320,7 +254,7 @@ describe("interactive()", () => {
 
     // This should NOT throw even though promptArgs has keys — there's no prompt to substitute into
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptArgs: { COMPONENT: "LoginForm" },
     });
@@ -337,7 +271,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
     });
 
@@ -360,7 +294,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: promptPath,
     });
@@ -376,7 +310,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "inline prompt",
         promptFile: promptPath,
@@ -395,7 +329,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: promptPath,
       promptArgs: { COMPONENT: "LoginForm" },
@@ -424,7 +358,7 @@ describe("interactive()", () => {
     }).trim();
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: promptPath,
     });
@@ -448,7 +382,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       promptFile: promptPath,
     });
@@ -467,7 +401,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         promptFile: promptPath,
         promptArgs: { SOURCE_BRANCH: "custom" },
@@ -492,7 +426,7 @@ describe("interactive()", () => {
     }).trim();
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       branchStrategy: { type: "head" },
@@ -517,7 +451,7 @@ describe("interactive()", () => {
     }).trim();
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       branchStrategy: { type: "merge-to-head" },
@@ -545,7 +479,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       branchStrategy: { type: "branch", branch: "feature/test-branch" },
@@ -578,7 +512,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       hooks: {
@@ -601,7 +535,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         branchStrategy: { type: "merge-to-head" },
@@ -621,7 +555,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         branchStrategy: { type: "head" },
@@ -642,7 +576,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         branchStrategy: { type: "head" },
@@ -662,7 +596,7 @@ describe("interactive()", () => {
 
     try {
       await interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         branchStrategy: { type: "head" },
@@ -689,7 +623,7 @@ describe("interactive()", () => {
 
     await expect(
       interactive({
-        agent: claudeCode("claude-opus-4-8"),
+        agent: bob("default"),
         sandbox: provider,
         prompt: "test",
         branchStrategy: { type: "head" },
@@ -700,7 +634,7 @@ describe("interactive()", () => {
 
   it("allows signal to be omitted", () => {
     const opts: InteractiveOptions = {
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       prompt: "test",
     };
     expect(opts.signal).toBeUndefined();
@@ -709,7 +643,7 @@ describe("interactive()", () => {
   it("allows signal to be specified on InteractiveOptions", () => {
     const ac = new AbortController();
     const opts: InteractiveOptions = {
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       prompt: "test",
       signal: ac.signal,
     };
@@ -742,7 +676,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       cwd: otherRepo,
@@ -763,7 +697,7 @@ describe("interactive()", () => {
     });
 
     const result = await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       // no cwd option
@@ -790,7 +724,7 @@ describe("interactive()", () => {
     });
 
     await interactive({
-      agent: claudeCode("claude-opus-4-8"),
+      agent: bob("default"),
       sandbox: provider,
       prompt: "test",
       branchStrategy: { type: "merge-to-head" },

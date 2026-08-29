@@ -204,42 +204,7 @@ export interface AgentEntry {
   readonly setupCommand: string;
 }
 
-const CLAUDE_CODE_DOCKERFILE = `FROM node:22-bookworm
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-  git \\
-  curl \\
-  jq \\
-  && rm -rf /var/lib/apt/lists/*
-
-{{ISSUE_TRACKER_TOOLS}}
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-USER \${AGENT_UID}:\${AGENT_GID}
-
-# Install Claude Code CLI
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
-# Add Claude to PATH
-ENV PATH="/home/agent/.local/bin:$PATH"
-
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at ${SANDBOX_REPO_DIR}
-# and overrides the working directory to ${SANDBOX_REPO_DIR} at container start.
-# Structure your Dockerfile so that ${SANDBOX_REPO_DIR} can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
-`;
-
-const PI_DOCKERFILE = `FROM node:22-bookworm
+const BOB_DOCKERFILE = `FROM node:22-bookworm
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \\
@@ -259,8 +224,8 @@ ARG AGENT_GID=1000
 # Rename the base image's "node" user to "agent" and align UID/GID.
 RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
-# Install pi coding agent (run as root before USER agent)
-RUN npm install -g @mariozechner/pi-coding-agent
+# Install Bob-Shell CLI (run as root before USER agent)
+RUN curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash
 
 USER \${AGENT_UID}:\${AGENT_GID}
 
@@ -269,209 +234,19 @@ WORKDIR /home/agent
 # In worktree sandbox mode, Sandcastle bind-mounts the git worktree at ${SANDBOX_REPO_DIR}
 # and overrides the working directory to ${SANDBOX_REPO_DIR} at container start.
 # Structure your Dockerfile so that ${SANDBOX_REPO_DIR} can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
-`;
-
-const CODEX_DOCKERFILE = `FROM node:22-bookworm
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-  git \\
-  curl \\
-  jq \\
-  && rm -rf /var/lib/apt/lists/*
-
-{{ISSUE_TRACKER_TOOLS}}
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-
-# Install Codex CLI (run as root before USER agent)
-RUN npm install -g @openai/codex
-
-USER \${AGENT_UID}:\${AGENT_GID}
-
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at ${SANDBOX_REPO_DIR}
-# and overrides the working directory to ${SANDBOX_REPO_DIR} at container start.
-# Structure your Dockerfile so that ${SANDBOX_REPO_DIR} can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
-`;
-
-const CURSOR_DOCKERFILE = `FROM node:22-bookworm
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-  git \\
-  curl \\
-  jq \\
-  && rm -rf /var/lib/apt/lists/*
-
-{{ISSUE_TRACKER_TOOLS}}
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-USER \${AGENT_UID}:\${AGENT_GID}
-
-# Install Cursor Agent CLI
-RUN curl https://cursor.com/install -fsS | bash
-
-# Add Cursor CLI to PATH
-ENV PATH="/home/agent/.local/bin:$PATH"
-
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at ${SANDBOX_REPO_DIR}
-# and overrides the working directory to ${SANDBOX_REPO_DIR} at container start.
-# Structure your Dockerfile so that ${SANDBOX_REPO_DIR} can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
-`;
-
-const OPENCODE_DOCKERFILE = `FROM node:22-bookworm
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-  git \\
-  curl \\
-  jq \\
-  && rm -rf /var/lib/apt/lists/*
-
-{{ISSUE_TRACKER_TOOLS}}
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-
-# Install OpenCode CLI (run as root before USER agent)
-RUN npm install -g opencode-ai@latest
-
-USER \${AGENT_UID}:\${AGENT_GID}
-
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at \${SANDBOX_REPO_DIR}
-# and overrides the working directory to \${SANDBOX_REPO_DIR} at container start.
-# Structure your Dockerfile so that \${SANDBOX_REPO_DIR} can serve as the project root.
-ENTRYPOINT ["sleep", "infinity"]
-`;
-
-const COPILOT_DOCKERFILE = `FROM node:22-bookworm
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \\
-  git \\
-  curl \\
-  jq \\
-  && rm -rf /var/lib/apt/lists/*
-
-{{ISSUE_TRACKER_TOOLS}}
-
-# Build-args for UID/GID alignment: sandcastle docker build-image
-# defaults these to the host user's UID/GID so image-built files
-# and bind-mounted files share an owner without runtime chown.
-ARG AGENT_UID=1000
-ARG AGENT_GID=1000
-
-# Rename the base image's "node" user to "agent" and align UID/GID.
-RUN groupmod -o -g $AGENT_GID node && usermod -o -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
-
-# Install GitHub Copilot CLI (run as root before USER agent)
-RUN npm install -g @github/copilot
-
-USER \${AGENT_UID}:\${AGENT_GID}
-
-WORKDIR /home/agent
-
-# In worktree sandbox mode, Sandcastle bind-mounts the git worktree at \${SANDBOX_REPO_DIR}
-# and overrides the working directory to \${SANDBOX_REPO_DIR} at container start.
-# Structure your Dockerfile so that \${SANDBOX_REPO_DIR} can serve as the project root.
 ENTRYPOINT ["sleep", "infinity"]
 `;
 
 const AGENT_REGISTRY: AgentEntry[] = [
   {
-    name: "claude-code",
-    label: "Claude Code",
-    defaultModel: "claude-opus-4-8",
-    factoryImport: "claudeCode",
-    dockerfileTemplate: CLAUDE_CODE_DOCKERFILE,
-    envExample: `# Claude Code OAuth token — get one by running \`claude setup-token\` on your host.
-# Lets the agent use your Claude subscription instead of an API key.
-CLAUDE_CODE_OAUTH_TOKEN=
-# Or use an Anthropic API key instead — uncomment and fill in:
-# ANTHROPIC_API_KEY=`,
-    setupCommand: `claude "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
-  },
-  {
-    name: "pi",
-    label: "Pi",
-    defaultModel: "claude-sonnet-4-6",
-    factoryImport: "pi",
-    dockerfileTemplate: PI_DOCKERFILE,
-    envExample: `# Anthropic API key
-ANTHROPIC_API_KEY=`,
-    setupCommand: `pi "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
-  },
-  {
-    name: "codex",
-    label: "Codex",
-    defaultModel: "gpt-5.4",
-    factoryImport: "codex",
-    dockerfileTemplate: CODEX_DOCKERFILE,
-    envExample: `# OpenAI API key
-OPENAI_KEY=`,
-    setupCommand: `codex "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
-  },
-  {
-    name: "cursor",
-    label: "Cursor",
-    defaultModel: "composer-2",
-    factoryImport: "cursor",
-    dockerfileTemplate: CURSOR_DOCKERFILE,
-    envExample: `# Cursor API key (recommended)
-# You can also pass --api-key directly to the agent CLI.
-CURSOR_API_KEY=`,
-    setupCommand: `agent "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
-  },
-  {
-    name: "opencode",
-    label: "OpenCode",
-    defaultModel: "opencode/big-pickle",
-    factoryImport: "opencode",
-    dockerfileTemplate: OPENCODE_DOCKERFILE,
-    envExample: `# OpenCode API key
-OPENCODE_API_KEY=`,
-    setupCommand: `opencode --prompt "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
-  },
-  {
-    name: "copilot",
-    label: "GitHub Copilot CLI",
-    defaultModel: "claude-sonnet-4.5",
-    factoryImport: "copilot",
-    dockerfileTemplate: COPILOT_DOCKERFILE,
-    envExample: `# GitHub token with the "Copilot Requests" permission
-# (a fine-grained PAT, or any token from \`gh auth login\`).
-# COPILOT_GITHUB_TOKEN takes precedence over GH_TOKEN and GITHUB_TOKEN.
-GITHUB_TOKEN=`,
-    setupCommand: `copilot -i "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
+    name: "bob",
+    label: "Bob",
+    defaultModel: "default",
+    factoryImport: "bob",
+    dockerfileTemplate: BOB_DOCKERFILE,
+    envExample: `# Bob-Shell API key
+BOB_API_KEY=`,
+    setupCommand: `bob run "$(cat ${SETUP_ISSUE_TRACKER_PATH})"`,
   },
 ];
 
@@ -645,11 +420,6 @@ export function getNextStepsLines(
       "Next steps:",
       `1. Set the required env vars in .sandcastle/.env (see .sandcastle/.env.example)`,
     ];
-    if (agent.name === "claude-code") {
-      lines.push(
-        "   To use your Claude subscription instead of an API key, run `claude setup-token` on your host and paste the result into CLAUDE_CODE_OAUTH_TOKEN.",
-      );
-    }
     lines.push(
       "2. Read and customize .sandcastle/prompt.md to describe what you want the agent to do",
       `3. Customize .sandcastle/${mainFilename} — it uses the JS API (\`run()\`) to control how the agent runs`,
@@ -665,11 +435,6 @@ export function getNextStepsLines(
       "Next steps:",
       `${step++}. Set the required env vars in .sandcastle/.env (see .sandcastle/.env.example)`,
     ];
-    if (agent.name === "claude-code") {
-      lines.push(
-        "   To use your Claude subscription instead of an API key, run `claude setup-token` on your host and paste the result into CLAUDE_CODE_OAUTH_TOKEN.",
-      );
-    }
     lines.push(
       `${step++}. Add "sandcastle": "npx tsx .sandcastle/${mainFilename}" to your package.json scripts`,
       `${step++}. Templates use \`copyToWorktree: ["node_modules"]\` to copy your host node_modules into the sandbox for fast startup — the \`npm install\` in the onSandboxReady hook is a safety net for platform-specific binaries. Adjust both if you use a different package manager`,
@@ -755,11 +520,11 @@ const copyTemplateFiles = (
   });
 
 /**
- * Replace the agent factory and sandbox provider in a scaffolded main.ts.
+ * Replace the model and sandbox provider in a scaffolded main.ts.
  *
- * Templates use `claudeCode` as the default agent factory and `docker` as the
- * default sandbox provider. When a different agent, model, or sandbox provider
- * is selected, this function rewrites the imports and factory calls.
+ * Templates use `bob` as the agent factory and `docker` as the default
+ * sandbox provider. When a different model or sandbox provider is selected,
+ * this function rewrites the factory calls.
  */
 const rewriteMainTs = (
   configDir: string,
@@ -787,10 +552,6 @@ const rewriteMainTs = (
       content = content.replace(/main\.mts/g, "main.ts");
     }
 
-    // Replace factory function name in imports (e.g. claudeCode → pi)
-    // and all factory calls with the correct model.
-    // Templates always use claudeCode as the placeholder factory.
-    content = content.replace(/\bclaudeCode\b/g, agent.factoryImport);
     // Replace model strings in factory calls: factoryImport("any-model")
     const factoryCallRe = new RegExp(
       `${agent.factoryImport}\\(["']([^"']+)["']\\)`,

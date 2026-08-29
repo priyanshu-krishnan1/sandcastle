@@ -114,7 +114,7 @@ const runFail = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
 
 describe("sanitizeName", () => {
   it("lowercases the name", () => {
-    expect(sanitizeName("Claude-Code")).toBe("claude-code");
+    expect(sanitizeName("Bob-Shell")).toBe("bob-shell");
   });
 
   it("replaces non-alphanumeric characters with hyphens", () => {
@@ -122,7 +122,7 @@ describe("sanitizeName", () => {
   });
 
   it("passes through a typical name unchanged", () => {
-    expect(sanitizeName("claude-code")).toBe("claude-code");
+    expect(sanitizeName("bob-shell")).toBe("bob-shell");
   });
 
   it("handles names with dots and slashes", () => {

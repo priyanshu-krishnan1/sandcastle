@@ -330,7 +330,7 @@ export interface Timeouts {
 }
 
 export interface RunOptions<A extends AgentProvider = AgentProvider> {
-  /** Agent provider to use (e.g. claudeCode("claude-opus-4-8")) */
+  /** Agent provider to use (e.g. bob("default")) */
   readonly agent: A;
   /** Sandbox provider (e.g. docker({ imageName: "sandcastle:myrepo" })). */
   readonly sandbox: SandboxProvider;
@@ -409,6 +409,13 @@ export interface RunOptions<A extends AgentProvider = AgentProvider> {
   readonly signal?: AbortSignal;
   /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
   readonly timeouts?: Timeouts;
+  /**
+   * Number of additional attempts per iteration when the agent fails with an
+   * `AgentError` or `AgentIdleTimeoutError` (e.g. SSH disconnect, non-zero exit,
+   * idle timeout). Each retry creates a completely fresh sandbox, so lifecycle
+   * is unaffected. Default: `0` (no retries).
+   */
+  readonly iterationRetries?: number;
   /**
    * Structured output definition. When provided, the agent's stdout is
    * scanned for the configured XML tag after the iteration completes, and the
@@ -570,8 +577,7 @@ export async function run(
   if (outputMaxRetries > 0 && !provider.sessionStorage) {
     throw new Error(
       `output.maxRetries requires an agent provider that supports session resumption. ` +
-        `The "${provider.name}" provider does not. ` +
-        `Use claudeCode, codex, or pi, or set maxRetries to 0.`,
+        `The "${provider.name}" provider does not. Set maxRetries to 0.`,
     );
   }
 
@@ -754,6 +760,7 @@ export async function run(
       signal: options.signal,
       skipPromptExpansion: isInlinePrompt,
       timeouts: options.timeouts,
+      iterationRetries: options.iterationRetries,
     });
 
     const completion = buildCompletionMessage(

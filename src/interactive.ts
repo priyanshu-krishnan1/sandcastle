@@ -45,7 +45,7 @@ import { resolveCwd } from "./resolveCwd.js";
 import type { Timeouts } from "./run.js";
 
 export interface InteractiveOptions {
-  /** Agent provider to use (e.g. claudeCode("claude-opus-4-8")) */
+  /** Agent provider to use (e.g. bob("default")) */
   readonly agent: AgentProvider;
   /** Sandbox provider (e.g. docker(), noSandbox()). */
   readonly sandbox?: AnySandboxProvider;

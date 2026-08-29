@@ -1,27 +1,18 @@
 import { exec } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { claudeCode, codex, pi } from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 import { createSandbox, type CreateSandboxOptions } from "./createSandbox.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
-  type BindMountSandboxHandle,
 } from "./SandboxProvider.js";
-import { encodeProjectPath } from "./SessionStore.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 
@@ -56,111 +47,26 @@ const commitFile = async (
   await execAsync(`git commit -m "${message}"`, { cwd: dir });
 };
 
-/** Format a mock agent result as stream-json lines (mimicking Claude's output) */
+/** Format a mock agent result as bob's stream-json lines. */
 const toStreamJson = (output: string): string => {
   const lines: string[] = [];
   lines.push(
-    JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: output }] },
-    }),
+    JSON.stringify({ type: "message", role: "assistant", content: output }),
   );
-  lines.push(JSON.stringify({ type: "result", result: output }));
+  lines.push(JSON.stringify({ type: "result", status: "success", result: output }));
   return lines.join("\n");
 };
 
-const testProvider = claudeCode("test-model");
-const testPiProvider = pi("test-model");
-
-/** Format a mock pi agent result as stream-json lines */
-const toPiStreamJson = (output: string): string => {
-  const lines: string[] = [];
-  lines.push(
-    JSON.stringify({
-      type: "message_update",
-      assistantMessageEvent: { type: "text_delta", delta: output },
-    }),
-  );
-  lines.push(
-    JSON.stringify({
-      type: "agent_end",
-      messages: [
-        {
-          role: "assistant",
-          content: [{ type: "text", text: output }],
-        },
-      ],
-    }),
-  );
-  return lines.join("\n");
-};
-
-/** Known agent command prefixes and their stream formatters */
-const AGENT_PREFIXES: { prefix: string; toStream: (o: string) => string }[] = [
-  { prefix: "claude ", toStream: toStreamJson },
-  { prefix: "pi ", toStream: toPiStreamJson },
-];
+const testProvider = bob("test-model");
 
 /**
- * Format a mock codex agent result as JSON stream lines, optionally including
- * a `turn.completed` usage event so the Orchestrator can surface usage data
- * via `streamUsage` (no session capture required).
+ * Known agent command substrings and their stream formatters. bob's actual
+ * command is a long install-check preamble ending in `bob run --format
+ * stream-json`, so matching uses `.includes()`, not `.startsWith()`.
  */
-const toCodexStreamJsonWithUsage = (
-  output: string,
-  usage: {
-    input_tokens: number;
-    cached_input_tokens: number;
-    output_tokens: number;
-  },
-): string => {
-  const lines: string[] = [
-    JSON.stringify({
-      type: "item.completed",
-      item: { type: "agent_message", text: output },
-    }),
-    JSON.stringify({ type: "turn.completed", usage }),
-  ];
-  return lines.join("\n");
-};
-
-/** Mock sandbox that intercepts `codex` commands and emits stream usage. */
-const makeMockCodexLayerWithUsage = (
-  sandboxDir: string,
-  output: string,
-  usage: {
-    input_tokens: number;
-    cached_input_tokens: number;
-    output_tokens: number;
-  },
-): SandboxService => {
-  const real = makeLocalSandbox(sandboxDir);
-  return {
-    exec: (command, options) => {
-      if (command.startsWith("codex ")) {
-        const streamOutput = toCodexStreamJsonWithUsage(output, usage);
-        if (options?.onLine) {
-          const onLine = options.onLine;
-          return Effect.gen(function* () {
-            for (const line of streamOutput.split("\n")) {
-              onLine(line);
-            }
-            return { stdout: streamOutput, stderr: "", exitCode: 0 };
-          });
-        }
-        return Effect.succeed({
-          stdout: streamOutput,
-          stderr: "",
-          exitCode: 0,
-        });
-      }
-      return real.exec(command, options);
-    },
-    copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-    copyFileOut: (sandboxPath, hostPath) =>
-      real.copyFileOut(sandboxPath, hostPath),
-  };
-};
+const AGENT_PREFIXES: { prefix: string; toStream: (o: string) => string }[] = [
+  { prefix: "bob run", toStream: toStreamJson },
+];
 
 /**
  * Create a mock sandbox layer that intercepts agent commands and runs a
@@ -173,7 +79,7 @@ const makeMockAgentLayer = (
   const real = makeLocalSandbox(sandboxDir);
 
   const matchAgent = (command: string) =>
-    AGENT_PREFIXES.find((a) => command.startsWith(a.prefix));
+    AGENT_PREFIXES.find((a) => command.includes(a.prefix));
 
   return {
     exec: (command, options) => {
@@ -207,7 +113,7 @@ const makeMockAgentLayer = (
 
 /**
  * Create a mock isolated sandbox provider that intercepts agent commands.
- * Uses testIsolated() as a base and wraps exec to intercept claude/pi commands.
+ * Uses testIsolated() as a base and wraps exec to intercept the bob command.
  */
 const makeMockIsolatedProvider = (
   mockAgentBehavior: (cwd: string) => Promise<string> = async () =>
@@ -222,7 +128,7 @@ const makeMockIsolatedProvider = (
         ...handle,
         exec: async (command: string, options?: any) => {
           const agent = AGENT_PREFIXES.find((a) =>
-            command.startsWith(a.prefix),
+            command.includes(a.prefix),
           );
           if (agent && options?.onLine) {
             const cwd = options?.cwd ?? handle.worktreePath;
@@ -301,184 +207,6 @@ describe("createSandbox", () => {
     }
   });
 
-  it("sandbox.run() emits 'Context window: NNNk' line when an iteration has usage", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-test-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "init.txt", "init", "initial commit");
-    const logPath = join(hostDir, "ctxwin.log");
-
-    const sandbox = await createSandbox({
-      branch: "ctxwin-branch",
-      sandbox: testSandbox,
-      cwd: hostDir,
-      _test: {
-        buildSandbox: (sandboxDir) =>
-          makeMockCodexLayerWithUsage(sandboxDir, "ok", {
-            input_tokens: 50000,
-            cached_input_tokens: 0,
-            output_tokens: 100,
-          }),
-      },
-    });
-
-    try {
-      const result = await sandbox.run({
-        agent: codex("gpt-test"),
-        prompt: "do something",
-        maxIterations: 1,
-        logging: { type: "file", path: logPath },
-      });
-
-      // Sanity-check: orchestrator surfaced usage on the iteration.
-      expect(result.iterations[0]!.usage).toBeDefined();
-
-      const log = await readFile(logPath, "utf-8");
-      expect(log).toContain("Context window: 50k");
-    } finally {
-      await sandbox.close();
-      await rm(hostDir, { recursive: true, force: true });
-    }
-  });
-
-  it("sandbox.run() captures Claude session and emits 'Context window' from parsed usage (regression: #717)", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-claude-cap-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "sandbox-claude-host-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "sandbox-claude-sb-projects-"),
-    );
-    await initRepo(hostDir);
-    await commitFile(hostDir, "init.txt", "init", "initial commit");
-    const logPath = join(hostDir, "ctxwin.log");
-    const mockSessionId = "createSandbox-cap-session-1";
-
-    const sandboxBaseDir = mkdtempSync(join(tmpdir(), "sandbox-claude-sb-"));
-
-    // Fake bind-mount handle whose copyFileOut/copyFileIn are filesystem copies.
-    // captureToHost reads the session JSONL out of the sandbox via this handle.
-    const fakeHandle: BindMountSandboxHandle = {
-      worktreePath: sandboxBaseDir,
-      exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-      copyFileIn: async (hostPath, sandboxPath) => {
-        await mkdir(dirname(sandboxPath), { recursive: true });
-        await copyFile(hostPath, sandboxPath);
-      },
-      copyFileOut: async (sandboxPath, hostPath) => {
-        await mkdir(dirname(hostPath), { recursive: true });
-        await copyFile(sandboxPath, hostPath);
-      },
-      close: async () => {},
-    };
-
-    const provider = claudeCode("test-model", {
-      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-    });
-
-    // Build a sandbox layer that intercepts `claude ...` and writes a fake
-    // session JSONL containing a usage block. The orchestrator parses the
-    // captured JSONL via parseSessionUsage and surfaces it as iteration usage.
-    const buildSandbox = (sandboxDir: string): SandboxService => {
-      const real = makeLocalSandbox(sandboxDir);
-      return {
-        exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
-            const onLine = options.onLine;
-            return Effect.gen(function* () {
-              const cwd = options?.cwd ?? sandboxDir;
-              const encoded = encodeProjectPath(cwd);
-              const sessionsDir = join(sandboxProjectsDir, encoded);
-              yield* Effect.promise(async () => {
-                await mkdir(sessionsDir, { recursive: true });
-                await writeFile(
-                  join(sessionsDir, `${mockSessionId}.jsonl`),
-                  [
-                    JSON.stringify({
-                      type: "system",
-                      subtype: "init",
-                      session_id: mockSessionId,
-                      cwd,
-                    }),
-                    JSON.stringify({
-                      type: "assistant",
-                      message: {
-                        model: "claude-opus-4-8",
-                        usage: {
-                          input_tokens: 50000,
-                          cache_creation_input_tokens: 0,
-                          cache_read_input_tokens: 0,
-                          output_tokens: 100,
-                        },
-                      },
-                      cwd,
-                    }),
-                  ].join("\n"),
-                );
-              });
-              const streamLines = [
-                JSON.stringify({
-                  type: "system",
-                  subtype: "init",
-                  session_id: mockSessionId,
-                }),
-                JSON.stringify({
-                  type: "assistant",
-                  message: { content: [{ type: "text", text: "ok" }] },
-                }),
-                JSON.stringify({ type: "result", result: "ok" }),
-              ].join("\n");
-              for (const line of streamLines.split("\n")) {
-                onLine(line);
-              }
-              return { stdout: streamLines, stderr: "", exitCode: 0 };
-            });
-          }
-          return real.exec(command, options);
-        },
-        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-        copyFileOut: (sandboxPath, hostPath) =>
-          real.copyFileOut(sandboxPath, hostPath),
-      };
-    };
-
-    const sandbox = await createSandbox({
-      branch: "ctxwin-claude-branch",
-      sandbox: testSandbox,
-      cwd: hostDir,
-      _test: {
-        buildSandbox,
-        bindMountHandle: fakeHandle,
-      },
-    });
-
-    try {
-      const result = await sandbox.run({
-        agent: provider,
-        prompt: "do something",
-        maxIterations: 1,
-        logging: { type: "file", path: logPath },
-      });
-
-      // Usage was parsed out of the captured session JSONL.
-      expect(result.iterations[0]!.usage).toEqual({
-        inputTokens: 50000,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: 0,
-        outputTokens: 100,
-      });
-      expect(result.iterations[0]!.sessionFilePath).toBeDefined();
-
-      const log = await readFile(logPath, "utf-8");
-      expect(log).toContain("Context window: 50k");
-    } finally {
-      await sandbox.close();
-      await rm(hostDir, { recursive: true, force: true });
-      await rm(hostProjectsDir, { recursive: true, force: true });
-      await rm(sandboxProjectsDir, { recursive: true, force: true });
-      await rm(sandboxBaseDir, { recursive: true, force: true });
-    }
-  });
-
   it("sandbox.run() rejects resumeSession with maxIterations > 1", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "sandbox-resume-validate-"));
     await initRepo(hostDir);
@@ -519,142 +247,6 @@ describe("createSandbox", () => {
     }
   });
 
-  it("sandbox.run().resume() reuses the captured session in the same warm sandbox", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-resume-flow-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "sandbox-resume-host-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "sandbox-resume-sb-projects-"),
-    );
-    await initRepo(hostDir);
-    await commitFile(hostDir, "init.txt", "init", "initial commit");
-    const mockSessionId = "resume-sandbox-session-1";
-    const sandboxBaseDir = mkdtempSync(join(tmpdir(), "sandbox-resume-sb-"));
-
-    const fakeHandle: BindMountSandboxHandle = {
-      worktreePath: sandboxBaseDir,
-      exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-      copyFileIn: async (hostPath, sandboxPath) => {
-        await mkdir(dirname(sandboxPath), { recursive: true });
-        await copyFile(hostPath, sandboxPath);
-      },
-      copyFileOut: async (sandboxPath, hostPath) => {
-        await mkdir(dirname(hostPath), { recursive: true });
-        await copyFile(sandboxPath, hostPath);
-      },
-      close: async () => {},
-    };
-
-    const capturedCommands: string[] = [];
-
-    // Mock agent: writes a session JSONL on every call, and records the
-    // command so we can verify `--resume <id>` is forwarded on the resume
-    // call. The second invocation's session id matches the first so the
-    // resume can be detected without depending on agent CLI parsing.
-    const buildSandbox = (sandboxDir: string): SandboxService => {
-      const real = makeLocalSandbox(sandboxDir);
-      return {
-        exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
-            capturedCommands.push(command);
-            const onLine = options.onLine;
-            return Effect.gen(function* () {
-              const cwd = options?.cwd ?? sandboxDir;
-              const encoded = encodeProjectPath(cwd);
-              const sessionsDir = join(sandboxProjectsDir, encoded);
-              yield* Effect.promise(async () => {
-                await mkdir(sessionsDir, { recursive: true });
-                await writeFile(
-                  join(sessionsDir, `${mockSessionId}.jsonl`),
-                  [
-                    JSON.stringify({
-                      type: "system",
-                      subtype: "init",
-                      session_id: mockSessionId,
-                      cwd,
-                    }),
-                    JSON.stringify({
-                      type: "assistant",
-                      message: {
-                        model: "claude-opus-4-8",
-                        usage: {
-                          input_tokens: 100,
-                          cache_creation_input_tokens: 0,
-                          cache_read_input_tokens: 0,
-                          output_tokens: 50,
-                        },
-                      },
-                      cwd,
-                    }),
-                  ].join("\n"),
-                );
-              });
-              const streamLines = [
-                JSON.stringify({
-                  type: "system",
-                  subtype: "init",
-                  session_id: mockSessionId,
-                }),
-                JSON.stringify({
-                  type: "assistant",
-                  message: { content: [{ type: "text", text: "ok" }] },
-                }),
-                JSON.stringify({ type: "result", result: "ok" }),
-              ].join("\n");
-              for (const line of streamLines.split("\n")) {
-                onLine(line);
-              }
-              return { stdout: streamLines, stderr: "", exitCode: 0 };
-            });
-          }
-          return real.exec(command, options);
-        },
-        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-        copyFileOut: (sandboxPath, hostPath) =>
-          real.copyFileOut(sandboxPath, hostPath),
-      };
-    };
-
-    const sandbox = await createSandbox({
-      branch: "resume-flow",
-      sandbox: testSandbox,
-      cwd: hostDir,
-      _test: {
-        buildSandbox,
-        bindMountHandle: fakeHandle,
-      },
-    });
-
-    try {
-      const first = await sandbox.run({
-        agent: claudeCode("test-model", {
-          sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-        }),
-        prompt: "do something",
-        maxIterations: 1,
-      });
-
-      expect(first.iterations[0]!.sessionId).toBe(mockSessionId);
-      expect(typeof first.resume).toBe("function");
-      expect(typeof first.fork).toBe("function");
-
-      const second = await first.resume!("now do something else");
-
-      // The second iteration's agent command must include --resume <sid>.
-      expect(capturedCommands.length).toBe(2);
-      expect(capturedCommands[1]).toContain(`--resume '${mockSessionId}'`);
-      // Resume runs exactly one iteration.
-      expect(second.iterations.length).toBe(1);
-    } finally {
-      await sandbox.close();
-      await rm(hostDir, { recursive: true, force: true });
-      await rm(hostProjectsDir, { recursive: true, force: true });
-      await rm(sandboxProjectsDir, { recursive: true, force: true });
-      await rm(sandboxBaseDir, { recursive: true, force: true });
-    }
-  });
-
   it("sandbox.run() appends raw stdout to the same log file when logging.verbose is true", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "sandbox-verbose-"));
     await initRepo(hostDir);
@@ -662,23 +254,17 @@ describe("createSandbox", () => {
     const logPath = join(hostDir, "verbose.log");
 
     // Use a mock that emits both a recognised stream-JSON line and a line
-    // parseStreamLine drops (unknown tool) so we can verify ALL stdout
-    // makes it to the log file.
-    const droppedToolLine = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "tool_use",
-            name: "TotallyUnknownTool",
-            input: { foo: "bar" },
-          },
-        ],
-      },
+    // parseStreamLine drops (bob echoing the prompt back as a "user" message)
+    // so we can verify ALL stdout makes it to the log file.
+    const droppedLine = JSON.stringify({
+      type: "message",
+      role: "user",
+      content: "the original prompt, echoed back",
     });
     const recognisedLine = JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: "hello" }] },
+      type: "message",
+      role: "assistant",
+      content: "hello",
     });
 
     const sandbox = await createSandbox({
@@ -690,14 +276,14 @@ describe("createSandbox", () => {
           const real = makeLocalSandbox(sandboxDir);
           return {
             exec: (command, options) => {
-              if (command.startsWith("claude ") && options?.onLine) {
+              if (command.includes("bob run") && options?.onLine) {
                 const onLine = options.onLine;
                 return Effect.gen(function* () {
-                  for (const line of [droppedToolLine, recognisedLine]) {
+                  for (const line of [droppedLine, recognisedLine]) {
                     onLine(line);
                   }
                   return {
-                    stdout: [droppedToolLine, recognisedLine].join("\n"),
+                    stdout: [droppedLine, recognisedLine].join("\n"),
                     stderr: "",
                     exitCode: 0,
                   };
@@ -721,7 +307,7 @@ describe("createSandbox", () => {
       });
 
       const log = await readFile(logPath, "utf-8");
-      expect(log).toContain(droppedToolLine);
+      expect(log).toContain(droppedLine);
       expect(log).toContain(recognisedLine);
     } finally {
       await sandbox.close();
@@ -735,24 +321,18 @@ describe("createSandbox", () => {
     await commitFile(hostDir, "init.txt", "init", "initial commit");
     const logPath = join(hostDir, "verbose-off.log");
 
-    // Same dropped-tool line as the verbose-on test. With verbose unset it
+    // Same dropped line as the verbose-on test. With verbose unset it
     // must NOT appear in the log file (parseStreamLine drops it and only
     // the human-readable output reaches the file).
-    const droppedToolLine = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "tool_use",
-            name: "TotallyUnknownTool",
-            input: { foo: "bar" },
-          },
-        ],
-      },
+    const droppedLine = JSON.stringify({
+      type: "message",
+      role: "user",
+      content: "the original prompt, echoed back",
     });
     const recognisedLine = JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: "hello" }] },
+      type: "message",
+      role: "assistant",
+      content: "hello",
     });
 
     const sandbox = await createSandbox({
@@ -764,14 +344,14 @@ describe("createSandbox", () => {
           const real = makeLocalSandbox(sandboxDir);
           return {
             exec: (command, options) => {
-              if (command.startsWith("claude ") && options?.onLine) {
+              if (command.includes("bob run") && options?.onLine) {
                 const onLine = options.onLine;
                 return Effect.gen(function* () {
-                  for (const line of [droppedToolLine, recognisedLine]) {
+                  for (const line of [droppedLine, recognisedLine]) {
                     onLine(line);
                   }
                   return {
-                    stdout: [droppedToolLine, recognisedLine].join("\n"),
+                    stdout: [droppedLine, recognisedLine].join("\n"),
                     stderr: "",
                     exitCode: 0,
                   };
@@ -795,7 +375,7 @@ describe("createSandbox", () => {
       });
 
       const log = await readFile(logPath, "utf-8");
-      expect(log).not.toContain(droppedToolLine);
+      expect(log).not.toContain(droppedLine);
       expect(log).not.toContain(recognisedLine);
     } finally {
       await sandbox.close();
@@ -1163,7 +743,7 @@ describe("createSandbox", () => {
     await rm(hostDir, { recursive: true, force: true });
   });
 
-  it("two sequential runs with different agents and prompts succeed on the same sandbox", async () => {
+  it("two sequential runs with different prompts succeed on the same sandbox", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "sandbox-test-"));
     await initRepo(hostDir);
     await commitFile(hostDir, "init.txt", "init", "initial commit");
@@ -1187,7 +767,7 @@ describe("createSandbox", () => {
       });
 
       const result2 = await sandbox.run({
-        agent: testPiProvider,
+        agent: testProvider,
         prompt: "review the code",
         maxIterations: 1,
         name: "Reviewer",
@@ -1316,13 +896,13 @@ describe("createSandbox", () => {
           worktreePath: workDir,
           exec: async (cmd, execOpts) => {
             const cwd = execOpts?.cwd ?? workDir;
-            if (cmd.startsWith("claude ") && execOpts?.onLine) {
+            if (cmd.includes("bob run") && execOpts?.onLine) {
               const onLine = execOpts.onLine;
               const output = toStreamJson("mock output");
               for (const line of output.split("\n")) onLine(line);
               return { stdout: output, stderr: "", exitCode: 0 };
             }
-            if (cmd.startsWith("claude ")) {
+            if (cmd.includes("bob run")) {
               return { stdout: "mock", stderr: "", exitCode: 0 };
             }
             const result = await execAsync(cmd, { cwd, env: isolatedEnv });
@@ -1396,13 +976,13 @@ describe("createSandbox", () => {
         worktreePath: opts.worktreePath,
         exec: async (cmd, execOpts) => {
           const cwd = execOpts?.cwd ?? opts.worktreePath;
-          if (cmd.startsWith("claude ") && execOpts?.onLine) {
+          if (cmd.includes("bob run") && execOpts?.onLine) {
             const onLine = execOpts.onLine;
             const output = toStreamJson("mock");
             for (const line of output.split("\n")) onLine(line);
             return { stdout: output, stderr: "", exitCode: 0 };
           }
-          if (cmd.startsWith("claude "))
+          if (cmd.includes("bob run"))
             return { stdout: "mock", stderr: "", exitCode: 0 };
           const result = await execAsync(cmd, { cwd, env: isolatedEnv });
           return {

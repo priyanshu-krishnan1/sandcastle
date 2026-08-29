@@ -2,14 +2,7 @@ import { Cause, Effect, Layer, Ref } from "effect";
 import { exec } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -18,29 +11,21 @@ import { Display, type DisplayEntry, SilentDisplay } from "./Display.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 import { orchestrate } from "./Orchestrator.js";
 import { substitutePromptArgs } from "./PromptArgumentSubstitution.js";
-import {
-  claudeCode,
-  codex as codexFactory,
-  opencode as opencodeFactory,
-  pi as piFactory,
-  DEFAULT_MODEL,
-} from "./AgentProvider.js";
+import { bob } from "./AgentProvider.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import type { DockerError, SandboxError } from "./errors.js";
 import { AgentError, AgentIdleTimeoutError } from "./errors.js";
 import { SandboxFactory } from "./SandboxFactory.js";
-import { encodeProjectPath } from "./SessionStore.js";
 import {
   agentStreamEmitterLayer,
   type AgentStreamEvent,
 } from "./AgentStreamEmitter.js";
-import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 const noopAgentStreamEmitterLayer = agentStreamEmitterLayer();
 
 const execAsync = promisify(exec);
 
-const testProvider = claudeCode("test-model");
+const testProvider = bob("test-model");
 
 const testDisplayLayer = Layer.mergeAll(
   SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
@@ -69,25 +54,18 @@ const getHead = async (dir: string) => {
   return stdout.trim();
 };
 
-/** Format a mock agent result as stream-json lines (mimicking Claude's output) */
+/** Format a mock agent result as bob's stream-json lines. */
 const toStreamJson = (output: string, sessionId?: string): string => {
   const lines: string[] = [];
   if (sessionId) {
-    lines.push(
-      JSON.stringify({
-        type: "system",
-        subtype: "init",
-        session_id: sessionId,
-      }),
-    );
+    lines.push(JSON.stringify({ type: "session_id", sessionId }));
   }
   lines.push(
-    JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: output }] },
-    }),
+    JSON.stringify({ type: "message", role: "assistant", content: output }),
   );
-  lines.push(JSON.stringify({ type: "result", result: output }));
+  lines.push(
+    JSON.stringify({ type: "result", status: "success", result: output }),
+  );
   return lines.join("\n");
 };
 
@@ -171,7 +149,7 @@ const makeMockAgentLayer = (
 
   return {
     exec: (command, options) => {
-      if (command.startsWith("claude ")) {
+      if (command.includes("bob run")) {
         if (options?.onLine) {
           const onLine = options.onLine;
           return Effect.gen(function* () {
@@ -812,323 +790,6 @@ describe("OrchestrateResult", () => {
   });
 });
 
-describe("parseStreamLine (via claudeCode provider)", () => {
-  it("extracts text from assistant message", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: { content: [{ type: "text", text: "Hello world" }] },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "Hello world" },
-    ]);
-  });
-
-  it("extracts result from result message", () => {
-    const line = JSON.stringify({
-      type: "result",
-      result: "Final answer <promise>COMPLETE</promise>",
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      {
-        type: "result",
-        result: "Final answer <promise>COMPLETE</promise>",
-      },
-    ]);
-  });
-
-  it("returns empty array for non-JSON lines", () => {
-    expect(claudeCode("test-model").parseStreamLine("not json")).toEqual([]);
-    expect(claudeCode("test-model").parseStreamLine("")).toEqual([]);
-  });
-
-  it("returns empty array for malformed JSON starting with {", () => {
-    expect(claudeCode("test-model").parseStreamLine("{bad json")).toEqual([]);
-    expect(
-      claudeCode("test-model").parseStreamLine('{"type": "assistant", broken'),
-    ).toEqual([]);
-  });
-
-  it("returns empty array for unrecognized JSON types", () => {
-    const line = JSON.stringify({ type: "system", data: "something" });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([]);
-  });
-
-  it("handles multiple text content blocks", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "Hello " },
-          { type: "text", text: "world" },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "Hello world" },
-    ]);
-  });
-
-  it("skips malformed tool_use blocks (no name/input)", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "tool_use", id: "123" },
-          { type: "text", text: "result" },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "result" },
-    ]);
-  });
-
-  it("extracts tool_use block from assistant event (Bash → command arg)", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "tool_use", name: "Bash", input: { command: "npm test" } },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "tool_call", name: "Bash", args: "npm test" },
-    ]);
-  });
-
-  it("handles mixed text and tool_use content blocks", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "Running tests..." },
-          { type: "tool_use", name: "Bash", input: { command: "npm test" } },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "Running tests..." },
-      { type: "tool_call", name: "Bash", args: "npm test" },
-    ]);
-  });
-
-  it("handles multiple tool_use blocks in one event", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "tool_use", name: "Bash", input: { command: "npm test" } },
-          {
-            type: "tool_use",
-            name: "WebSearch",
-            input: { query: "typescript types" },
-          },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "tool_call", name: "Bash", args: "npm test" },
-      { type: "tool_call", name: "WebSearch", args: "typescript types" },
-    ]);
-  });
-
-  it("extracts WebFetch tool_use with url arg", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "tool_use",
-            name: "WebFetch",
-            input: { url: "https://example.com" },
-          },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "tool_call", name: "WebFetch", args: "https://example.com" },
-    ]);
-  });
-
-  it("extracts Agent tool_use with description arg", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "tool_use",
-            name: "Agent",
-            input: { description: "Run tests and report results" },
-          },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      {
-        type: "tool_call",
-        name: "Agent",
-        args: "Run tests and report results",
-      },
-    ]);
-  });
-
-  it("filters out non-allowlisted tools (Read, Glob, Grep, Edit, Write)", () => {
-    for (const name of ["Read", "Glob", "Grep", "Edit", "Write"]) {
-      const line = JSON.stringify({
-        type: "assistant",
-        message: {
-          content: [
-            { type: "tool_use", name, input: { file_path: "/some/file" } },
-          ],
-        },
-      });
-      expect(claudeCode("test-model").parseStreamLine(line)).toEqual([]);
-    }
-  });
-
-  it("filters out tool_use blocks with missing expected input field", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          // Bash with no `command` field
-          { type: "tool_use", name: "Bash", input: { other: "value" } },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([]);
-  });
-
-  it("keeps text events even when all tool_use blocks are filtered out", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [
-          { type: "text", text: "Looking at files..." },
-          { type: "tool_use", name: "Read", input: { file_path: "/foo" } },
-        ],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "Looking at files..." },
-    ]);
-  });
-
-  it("returns only text when event has no tool_use blocks", () => {
-    const line = JSON.stringify({
-      type: "assistant",
-      message: {
-        content: [{ type: "text", text: "Just text, no tools" }],
-      },
-    });
-    expect(claudeCode("test-model").parseStreamLine(line)).toEqual([
-      { type: "text", text: "Just text, no tools" },
-    ]);
-  });
-});
-
-describe("Orchestrator tool call display integration", () => {
-  it("emits toolCall display entries for allowlisted tools in stream", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-toolcall-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = Layer.merge(
-      SilentDisplay.layer(ref),
-      noopAgentStreamEmitterLayer,
-    );
-
-    const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
-      const real = makeLocalSandbox(dir);
-      return {
-        exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
-            const onLine = options.onLine;
-            const lines = [
-              JSON.stringify({
-                type: "assistant",
-                message: {
-                  content: [
-                    { type: "text", text: "Running tests..." },
-                    {
-                      type: "tool_use",
-                      name: "Bash",
-                      input: { command: "npm test" },
-                    },
-                    {
-                      type: "tool_use",
-                      name: "WebSearch",
-                      input: { query: "effect-ts docs" },
-                    },
-                    // Read should be filtered out
-                    {
-                      type: "tool_use",
-                      name: "Read",
-                      input: { file_path: "/src/foo.ts" },
-                    },
-                  ],
-                },
-              }),
-              JSON.stringify({
-                type: "result",
-                result: "<promise>COMPLETE</promise>",
-              }),
-            ];
-            for (const line of lines) onLine(line);
-            return Effect.succeed({
-              stdout: lines.join("\n"),
-              stderr: "",
-              exitCode: 0,
-            });
-          }
-          return real.exec(command, options);
-        },
-        copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-        copyFileOut: (sandboxPath, hostPath) =>
-          real.copyFileOut(sandboxPath, hostPath),
-      };
-    });
-
-    await Effect.runPromise(
-      orchestrate({
-        provider: testProvider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            mockLayer.factoryLayer,
-            displayLayer,
-            noopAgentStreamEmitterLayer,
-          ),
-        ),
-      ),
-    );
-
-    const entries = await Effect.runPromise(Ref.get(ref));
-    const toolCallEntries = entries.filter((e) => e._tag === "toolCall") as {
-      _tag: "toolCall";
-      name: string;
-      formattedArgs: string;
-    }[];
-
-    expect(toolCallEntries).toHaveLength(2);
-    expect(toolCallEntries[0]).toEqual({
-      _tag: "toolCall",
-      name: "Bash",
-      formattedArgs: "npm test",
-    });
-    expect(toolCallEntries[1]).toEqual({
-      _tag: "toolCall",
-      name: "WebSearch",
-      formattedArgs: "effect-ts docs",
-    });
-  });
-});
-
 describe("Orchestrator agent stream emitter", () => {
   it("emits text and toolCall events with iteration index and timestamps", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-"));
@@ -1147,24 +808,22 @@ describe("Orchestrator agent stream emitter", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             const onLine = options.onLine;
             const lines = [
               JSON.stringify({
-                type: "assistant",
-                message: {
-                  content: [
-                    { type: "text", text: "Working now" },
-                    {
-                      type: "tool_use",
-                      name: "Bash",
-                      input: { command: "ls" },
-                    },
-                  ],
-                },
+                type: "message",
+                role: "assistant",
+                content: "Working now",
+              }),
+              JSON.stringify({
+                type: "tool_call",
+                name: "Bash",
+                args: "ls",
               }),
               JSON.stringify({
                 type: "result",
+                status: "success",
                 result: "<promise>COMPLETE</promise>",
               }),
             ];
@@ -1230,7 +889,7 @@ describe("Orchestrator agent stream emitter", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             const onLine = options.onLine;
             const lines = [
               JSON.stringify({
@@ -1318,7 +977,7 @@ describe("Orchestrator agent stream emitter", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             const onLine = options.onLine;
             const lines = [
               droppedToolLine,
@@ -1382,7 +1041,7 @@ describe("Orchestrator error handling", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               return Effect.succeed({
                 stdout: "",
                 stderr: "Agent crashed",
@@ -1426,7 +1085,7 @@ describe("Orchestrator error handling", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               // Only emit an assistant line, no result line
               const assistantLine = JSON.stringify({
@@ -1480,7 +1139,7 @@ describe("Orchestrator error handling", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               callCount++;
               if (callCount === 1) {
@@ -1610,7 +1269,6 @@ describe("Orchestrator error handling", () => {
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    const opencodeProvider = opencodeFactory("test-model");
     const stdoutContent =
       "Setting up environment...\nLoading model...\nError: API key is invalid\nPlease check your credentials";
 
@@ -1618,7 +1276,7 @@ describe("Orchestrator error handling", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("opencode ")) {
+          if (command.includes("bob run")) {
             return Effect.succeed({
               stdout: stdoutContent,
               stderr: "",
@@ -1635,7 +1293,7 @@ describe("Orchestrator error handling", () => {
 
     const exit = await Effect.runPromiseExit(
       orchestrate({
-        provider: opencodeProvider,
+        provider: testProvider,
         hostRepoDir: hostDir,
         iterations: 1,
         prompt: "do some work",
@@ -1647,7 +1305,7 @@ describe("Orchestrator error handling", () => {
       const err = Cause.squash(exit.cause);
       expect(err).toBeInstanceOf(AgentError);
       if (err instanceof AgentError) {
-        expect(err.message).toContain("opencode exited with code 1:");
+        expect(err.message).toContain("bob exited with code 1:");
         expect(err.message).toContain("API key is invalid");
       }
     }
@@ -1659,9 +1317,13 @@ describe("Orchestrator error handling", () => {
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    // Use Claude Code provider which has a structured parser that populates resultText
+    // A "result" event with explicit result text populates resultText even
+    // though the mock reports a non-zero exit (bob's own stream doesn't
+    // encode failure via a "success" status the way this scenario implies —
+    // this is exercising the orchestrator's resultText fallback specifically).
     const errorLine = JSON.stringify({
       type: "result",
+      status: "success",
       result: "Rate limit exceeded, please retry later",
     });
 
@@ -1669,7 +1331,7 @@ describe("Orchestrator error handling", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             options.onLine(errorLine);
             return Effect.succeed({
               stdout: errorLine,
@@ -1699,7 +1361,7 @@ describe("Orchestrator error handling", () => {
       const err = Cause.squash(exit.cause);
       expect(err).toBeInstanceOf(AgentError);
       if (err instanceof AgentError) {
-        expect(err.message).toContain("claude-code exited with code 1:");
+        expect(err.message).toContain("bob exited with code 1:");
         expect(err.message).toContain(
           "Rate limit exceeded, please retry later",
         );
@@ -1713,13 +1375,11 @@ describe("Orchestrator error handling", () => {
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    const opencodeProvider = opencodeFactory("test-model");
-
     const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("opencode ")) {
+          if (command.includes("bob run")) {
             return Effect.succeed({
               stdout: "some stdout output",
               stderr: "fatal error from stderr",
@@ -1736,7 +1396,7 @@ describe("Orchestrator error handling", () => {
 
     const exit = await Effect.runPromiseExit(
       orchestrate({
-        provider: opencodeProvider,
+        provider: testProvider,
         hostRepoDir: hostDir,
         iterations: 1,
         prompt: "do some work",
@@ -1758,7 +1418,7 @@ describe("Orchestrator error handling", () => {
 });
 
 describe("Orchestrator streaming", () => {
-  it("invokes claude with stream-json and verbose flags", async () => {
+  it("invokes bob with stream-json format", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-host-"));
 
     await initRepo(hostDir);
@@ -1772,7 +1432,7 @@ describe("Orchestrator streaming", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               capturedCommand = command;
               const output = "Test output";
@@ -1806,9 +1466,7 @@ describe("Orchestrator streaming", () => {
       }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
     );
 
-    expect(capturedCommand).toContain("--output-format stream-json");
-    expect(capturedCommand).toContain("--verbose");
-    expect(capturedCommand).not.toContain("--output-format text");
+    expect(capturedCommand).toContain("bob run --format stream-json");
   });
 
   it("extracts completion signal from stream-json result line", async () => {
@@ -1841,7 +1499,7 @@ describe("Orchestrator streaming", () => {
     expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
 
-  it("uses the model baked into the provider", async () => {
+  it("uses the model/mode baked into the provider", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-defmodel-host-"));
 
     await initRepo(hostDir);
@@ -1855,7 +1513,7 @@ describe("Orchestrator streaming", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               capturedCommand = command;
               const output = "Done.";
@@ -1880,7 +1538,7 @@ describe("Orchestrator streaming", () => {
 
     await Effect.runPromise(
       orchestrate({
-        provider: claudeCode(DEFAULT_MODEL),
+        provider: bob("baked-in-mode"),
         hostRepoDir: hostDir,
 
         iterations: 1,
@@ -1888,7 +1546,7 @@ describe("Orchestrator streaming", () => {
       }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
     );
 
-    expect(capturedCommand).toContain(`--model '${DEFAULT_MODEL}'`);
+    expect(capturedCommand).toContain(`--mode 'baked-in-mode'`);
   });
 
   it("uses the model from a custom provider", async () => {
@@ -1905,7 +1563,7 @@ describe("Orchestrator streaming", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               capturedCommand = command;
               const output = "Done.";
@@ -1930,7 +1588,7 @@ describe("Orchestrator streaming", () => {
 
     await Effect.runPromise(
       orchestrate({
-        provider: claudeCode("claude-sonnet-4-6"),
+        provider: bob("custom-mode"),
         hostRepoDir: hostDir,
 
         iterations: 1,
@@ -1938,8 +1596,8 @@ describe("Orchestrator streaming", () => {
       }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
     );
 
-    expect(capturedCommand).toContain("--model 'claude-sonnet-4-6'");
-    expect(capturedCommand).not.toContain(DEFAULT_MODEL);
+    expect(capturedCommand).toContain("--mode 'custom-mode'");
+    expect(capturedCommand).not.toContain("baked-in-mode");
   });
 });
 
@@ -1958,7 +1616,7 @@ describe("Orchestrator prompt preprocessing", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               // Capture the prompt delivered via stdin
               capturedStdin = options?.stdin ?? "";
@@ -2020,7 +1678,7 @@ describe("Orchestrator prompt preprocessing", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               capturedStdin = options?.stdin ?? "";
               const output = "Done.";
@@ -2067,7 +1725,7 @@ describe("Orchestrator prompt preprocessing", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             const onLine = options.onLine;
             capturedStdin = options?.stdin ?? "";
             const output = "Done.";
@@ -2391,7 +2049,7 @@ describe("Orchestrator Display integration", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               return Effect.gen(function* () {
                 // Wait 100ms then emit a text event (resets idle timer)
@@ -2458,7 +2116,7 @@ describe("Orchestrator Display integration", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               return Effect.gen(function* () {
                 // Wait 100ms then emit a raw, unparsable line (should still reset idle timer)
@@ -2515,7 +2173,7 @@ describe("Orchestrator Display integration", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               return Effect.gen(function* () {
                 // Stay idle for 250ms — enough for ~2 warnings at 100ms interval
@@ -2589,7 +2247,7 @@ describe("Orchestrator Display integration", () => {
         const real = makeLocalSandbox(dir);
         return {
           exec: (command, options) => {
-            if (command.startsWith("claude ") && options?.onLine) {
+            if (command.includes("bob run") && options?.onLine) {
               const onLine = options.onLine;
               return Effect.gen(function* () {
                 // Idle for 150ms — warning fires at ~100ms
@@ -2660,1059 +2318,6 @@ describe("Orchestrator Display integration", () => {
       "Agent idle for 1 minute",
     );
   }, 10_000);
-});
-
-// ---------------------------------------------------------------------------
-// Pi provider integration tests
-// ---------------------------------------------------------------------------
-
-const piTestProvider = piFactory("claude-sonnet-4-6");
-
-/** Format a mock agent result as pi JSON stream lines */
-const toPiStreamJson = (output: string): string => {
-  const lines: string[] = [];
-  lines.push(
-    JSON.stringify({
-      type: "message_update",
-      assistantMessageEvent: { type: "text_delta", delta: output },
-    }),
-  );
-  lines.push(
-    JSON.stringify({
-      type: "agent_end",
-      messages: [
-        {
-          role: "assistant",
-          content: [{ type: "text", text: output }],
-        },
-      ],
-    }),
-  );
-  return lines.join("\n");
-};
-
-/**
- * Create a mock sandbox layer that intercepts `pi` commands
- * and runs a mock script instead.
- */
-const makeMockPiAgentLayer = (
-  sandboxDir: string,
-  mockAgentBehavior: (sandboxRepoDir: string) => Promise<string>,
-): SandboxService => {
-  const real = makeLocalSandbox(sandboxDir);
-
-  return {
-    exec: (command, options) => {
-      if (command.startsWith("pi ")) {
-        if (options?.onLine) {
-          const onLine = options.onLine;
-          return Effect.gen(function* () {
-            const cwd = options?.cwd ?? sandboxDir;
-            const output = yield* Effect.promise(() => mockAgentBehavior(cwd));
-            const streamOutput = toPiStreamJson(output);
-            for (const line of streamOutput.split("\n")) {
-              onLine(line);
-            }
-            return { stdout: streamOutput, stderr: "", exitCode: 0 };
-          });
-        }
-        return Effect.gen(function* () {
-          const cwd = options?.cwd ?? sandboxDir;
-          const output = yield* Effect.promise(() => mockAgentBehavior(cwd));
-          return { stdout: output, stderr: "", exitCode: 0 };
-        });
-      }
-      return real.exec(command, options);
-    },
-    copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-    copyFileOut: (sandboxPath, hostPath) =>
-      real.copyFileOut(sandboxPath, hostPath),
-  };
-};
-
-describe("Orchestrator with pi provider", () => {
-  it("runs a single iteration with pi provider and produces a commit", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-pi-host-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      (dir) =>
-        makeMockPiAgentLayer(dir, async (repoDir) => {
-          await writeFile(join(repoDir, "pi-output.txt"), "pi was here");
-          await execAsync("git add -A", { cwd: repoDir });
-          await execAsync('git config user.email "agent@test.com"', {
-            cwd: repoDir,
-          });
-          await execAsync('git config user.name "Agent"', { cwd: repoDir });
-          await execAsync('git commit -m "RALPH: pi agent commit"', {
-            cwd: repoDir,
-          });
-          return "Done with iteration.";
-        }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: piTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    const content = await readFile(join(hostDir, "pi-output.txt"), "utf-8");
-    expect(content).toBe("pi was here");
-  });
-
-  it("stops early on completion signal with pi provider", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-pi-host-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      (dir) =>
-        makeMockPiAgentLayer(dir, async () => {
-          return "All done. <promise>COMPLETE</promise>";
-        }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: piTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 5,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
-  });
-
-  it("buffers small pi text deltas into larger display chunks", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-pi-buf-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Build a mock that streams many tiny text_delta events (one per word),
-    // mimicking Pi's real streaming behavior.
-    const words = [
-      "Hello",
-      " ",
-      "world",
-      ".",
-      " ",
-      "This",
-      " ",
-      "is",
-      " ",
-      "a",
-      " ",
-      "test",
-      ".\n",
-    ];
-    const agentResult = "Hello world. This is a test.";
-    const streamLines: string[] = [];
-    for (const word of words) {
-      streamLines.push(
-        JSON.stringify({
-          type: "message_update",
-          assistantMessageEvent: { type: "text_delta", delta: word },
-        }),
-      );
-    }
-    streamLines.push(
-      JSON.stringify({
-        type: "agent_end",
-        messages: [
-          { role: "assistant", content: [{ type: "text", text: agentResult }] },
-        ],
-      }),
-    );
-
-    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = Layer.merge(
-      SilentDisplay.layer(ref),
-      noopAgentStreamEmitterLayer,
-    );
-
-    const real = makeLocalSandbox(hostDir);
-    const mockSandbox: SandboxService = {
-      exec: (command, options) => {
-        if (command.startsWith("pi ") && options?.onLine) {
-          const onLine = options.onLine;
-          return Effect.sync(() => {
-            for (const line of streamLines) {
-              onLine(line);
-            }
-            return { stdout: streamLines.join("\n"), stderr: "", exitCode: 0 };
-          });
-        }
-        return real.exec(command, options);
-      },
-      copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-      copyFileOut: (sandboxPath, hostPath) =>
-        real.copyFileOut(sandboxPath, hostPath),
-    };
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      () => mockSandbox,
-    );
-
-    await Effect.runPromise(
-      orchestrate({
-        provider: piTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
-    );
-
-    const entries = await Effect.runPromise(Ref.get(ref));
-    const textEntries = entries.filter(
-      (e): e is DisplayEntry & { _tag: "textChunk" } => e._tag === "textChunk",
-    );
-
-    // 13 individual text_delta events were streamed, but buffering should
-    // produce far fewer display entries. The exact count depends on heuristics
-    // (sentence boundary, newline, length threshold), but it must be less than 13.
-    expect(textEntries.length).toBeLessThan(words.length);
-    expect(textEntries.length).toBeGreaterThan(0);
-
-    // All text must be preserved — concatenation of display entries equals original
-    const displayedText = textEntries.map((e) => e.message).join("");
-    expect(displayedText).toBe(words.join(""));
-  });
-
-  it("flushes buffered text before tool call display", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-pi-tool-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Stream text deltas followed by a tool_execution_start
-    const streamLines = [
-      JSON.stringify({
-        type: "message_update",
-        assistantMessageEvent: { type: "text_delta", delta: "thinking" },
-      }),
-      JSON.stringify({
-        type: "tool_execution_start",
-        toolName: "Bash",
-        args: { command: "ls" },
-      }),
-      JSON.stringify({
-        type: "agent_end",
-        messages: [
-          { role: "assistant", content: [{ type: "text", text: "done" }] },
-        ],
-      }),
-    ];
-
-    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = Layer.merge(
-      SilentDisplay.layer(ref),
-      noopAgentStreamEmitterLayer,
-    );
-
-    const real = makeLocalSandbox(hostDir);
-    const mockSandbox: SandboxService = {
-      exec: (command, options) => {
-        if (command.startsWith("pi ") && options?.onLine) {
-          const onLine = options.onLine;
-          return Effect.sync(() => {
-            for (const line of streamLines) {
-              onLine(line);
-            }
-            return { stdout: streamLines.join("\n"), stderr: "", exitCode: 0 };
-          });
-        }
-        return real.exec(command, options);
-      },
-      copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-      copyFileOut: (sandboxPath, hostPath) =>
-        real.copyFileOut(sandboxPath, hostPath),
-    };
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      () => mockSandbox,
-    );
-
-    await Effect.runPromise(
-      orchestrate({
-        provider: piTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
-    );
-
-    const entries = await Effect.runPromise(Ref.get(ref));
-
-    // Find the text and toolCall entries
-    const relevantEntries = entries.filter(
-      (e) => e._tag === "textChunk" || e._tag === "toolCall",
-    );
-
-    // Text "thinking" must appear BEFORE the tool call
-    const textIdx = relevantEntries.findIndex(
-      (e) => e._tag === "textChunk" && e.message === "thinking",
-    );
-    const toolIdx = relevantEntries.findIndex((e) => e._tag === "toolCall");
-    expect(textIdx).toBeGreaterThanOrEqual(0);
-    expect(toolIdx).toBeGreaterThan(textIdx);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Codex provider integration tests
-// ---------------------------------------------------------------------------
-
-const codexTestProvider = codexFactory("gpt-5.4-mini");
-
-/** Format a mock agent result as Codex JSON stream lines */
-const toCodexStreamJson = (
-  output: string,
-  usage?: {
-    input_tokens: number;
-    cached_input_tokens: number;
-    output_tokens: number;
-  },
-): string => {
-  const lines: string[] = [];
-  lines.push(
-    JSON.stringify({
-      type: "item.completed",
-      item: { type: "agent_message", text: output },
-    }),
-  );
-  if (usage) {
-    lines.push(JSON.stringify({ type: "turn.completed", usage }));
-  }
-  return lines.join("\n");
-};
-
-/**
- * Create a mock sandbox layer that intercepts `codex` commands
- * and runs a mock script instead.
- */
-const makeMockCodexAgentLayer = (
-  sandboxDir: string,
-  mockAgentBehavior: (sandboxRepoDir: string) => Promise<string>,
-  usage?: {
-    input_tokens: number;
-    cached_input_tokens: number;
-    output_tokens: number;
-  },
-): SandboxService => {
-  const real = makeLocalSandbox(sandboxDir);
-
-  return {
-    exec: (command, options) => {
-      if (command.startsWith("codex ")) {
-        if (options?.onLine) {
-          const onLine = options.onLine;
-          return Effect.gen(function* () {
-            const cwd = options?.cwd ?? sandboxDir;
-            const output = yield* Effect.promise(() => mockAgentBehavior(cwd));
-            const streamOutput = toCodexStreamJson(output, usage);
-            for (const line of streamOutput.split("\n")) {
-              onLine(line);
-            }
-            return { stdout: streamOutput, stderr: "", exitCode: 0 };
-          });
-        }
-        return Effect.gen(function* () {
-          const cwd = options?.cwd ?? sandboxDir;
-          const output = yield* Effect.promise(() => mockAgentBehavior(cwd));
-          return { stdout: output, stderr: "", exitCode: 0 };
-        });
-      }
-      return real.exec(command, options);
-    },
-    copyIn: (hostPath, sandboxPath) => real.copyIn(hostPath, sandboxPath),
-    copyFileOut: (sandboxPath, hostPath) =>
-      real.copyFileOut(sandboxPath, hostPath),
-  };
-};
-
-describe("Orchestrator with codex provider", () => {
-  it("runs a single iteration with codex provider and produces a commit", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-codex-host-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      (dir) =>
-        makeMockCodexAgentLayer(dir, async (repoDir) => {
-          await writeFile(join(repoDir, "codex-output.txt"), "codex was here");
-          await execAsync("git add -A", { cwd: repoDir });
-          await execAsync('git config user.email "agent@test.com"', {
-            cwd: repoDir,
-          });
-          await execAsync('git config user.name "Agent"', { cwd: repoDir });
-          await execAsync('git commit -m "RALPH: codex agent commit"', {
-            cwd: repoDir,
-          });
-          return "Done with iteration.";
-        }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: codexTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    const content = await readFile(join(hostDir, "codex-output.txt"), "utf-8");
-    expect(content).toBe("codex was here");
-  });
-
-  it("stops early on completion signal with codex provider", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-codex-host-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
-      hostDir,
-      (dir) =>
-        makeMockCodexAgentLayer(dir, async () => {
-          return "All done. <promise>COMPLETE</promise>";
-        }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: codexTestProvider,
-        hostRepoDir: hostDir,
-
-        iterations: 5,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
-  });
-
-  it("populates usage on IterationResult from turn.completed stream events", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-codex-usage-host-"));
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
-      makeMockCodexAgentLayer(
-        dir,
-        async () => "All done. <promise>COMPLETE</promise>",
-        { input_tokens: 8497, cached_input_tokens: 8448, output_tokens: 51 },
-      ),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: codexTestProvider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    // Usage flows from the stream even without bind-mount session capture.
-    expect(result.iterations[0]!.usage).toEqual({
-      inputTokens: 49,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 8448,
-      outputTokens: 51,
-    });
-  });
-});
-
-describe("Session capture integration", () => {
-  /**
-   * Create a test factory that provides a bindMountHandle with copyFileIn/copyFileOut
-   * backed by the filesystem. This allows session capture to work through the
-   * sessionStorage.captureToHost / resumeIntoSandbox path.
-   */
-  const makeSessionCaptureFactory = (
-    hostRepoDir: string,
-    mockAgentBehavior: (sandboxRepoDir: string) => Promise<string>,
-    sessionId: string,
-  ): { factoryLayer: Layer.Layer<SandboxFactory> } => {
-    const sandboxBaseDir = join(tmpdir(), `orch-session-${randomUUID()}`);
-    let branchCounter = 0;
-
-    const factoryLayer = Layer.succeed(SandboxFactory, {
-      withSandbox: <A, E, R>(
-        makeEffect: (
-          info: import("./SandboxFactory.js").SandboxInfo,
-          sandbox: SandboxService,
-        ) => Effect.Effect<A, E, R>,
-      ): Effect.Effect<
-        import("./SandboxFactory.js").WithSandboxResult<A>,
-        E | DockerError,
-        R
-      > =>
-        Effect.acquireUseRelease(
-          Effect.promise(async () => {
-            await rm(sandboxBaseDir, { recursive: true, force: true });
-            const branchName = `sandcastle/test-${++branchCounter}`;
-            await execAsync(
-              `git worktree add -b "${branchName}" "${sandboxBaseDir}" HEAD`,
-              { cwd: hostRepoDir },
-            );
-            return branchName;
-          }),
-          (_branchName) => {
-            // Create a bind-mount handle backed by filesystem copy
-            const handle: BindMountSandboxHandle = {
-              worktreePath: sandboxBaseDir,
-              exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-              copyFileIn: async (hostPath, sandboxPath) => {
-                await mkdir(join(sandboxPath, ".."), { recursive: true });
-                await copyFile(hostPath, sandboxPath);
-              },
-              copyFileOut: async (sandboxPath, hostPath) => {
-                await mkdir(join(hostPath, ".."), { recursive: true });
-                await copyFile(sandboxPath, hostPath);
-              },
-              close: async () => {},
-            };
-
-            // Build a sandbox service that intercepts claude commands
-            const real = makeLocalSandbox(sandboxBaseDir);
-            const sandbox: SandboxService = {
-              exec: (command, options) => {
-                if (command.startsWith("claude ") && options?.onLine) {
-                  const onLine = options.onLine;
-                  return Effect.gen(function* () {
-                    const cwd = options?.cwd ?? sandboxBaseDir;
-                    const output = yield* Effect.promise(() =>
-                      mockAgentBehavior(cwd),
-                    );
-                    const streamOutput = toStreamJson(output, sessionId);
-                    for (const line of streamOutput.split("\n")) {
-                      onLine(line);
-                    }
-                    return { stdout: streamOutput, stderr: "", exitCode: 0 };
-                  });
-                }
-                return real.exec(command, options);
-              },
-              copyIn: (hostPath, sandboxPath) =>
-                real.copyIn(hostPath, sandboxPath),
-              copyFileOut: (sandboxPath, hostPath) =>
-                real.copyFileOut(sandboxPath, hostPath),
-            };
-
-            return makeEffect(
-              {
-                hostWorktreePath: sandboxBaseDir,
-                sandboxRepoPath: sandboxBaseDir,
-                applyToHost: () => Effect.void,
-                bindMountHandle: handle,
-              },
-              sandbox,
-            ) as Effect.Effect<A, E | DockerError, R>;
-          },
-          (_branchName) =>
-            Effect.promise(async () => {
-              try {
-                await execAsync(
-                  `git worktree remove "${sandboxBaseDir}" --force`,
-                  { cwd: hostRepoDir },
-                ).catch(() => {});
-              } catch {}
-            }),
-        ).pipe(
-          Effect.map((value) => ({ value, preservedWorktreePath: undefined })),
-        ),
-    });
-
-    return { factoryLayer };
-  };
-
-  it("captures session JSONL to host and populates sessionFilePath", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-capture-host-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-capture-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-capture-sb-projects-"),
-    );
-    const provider = claudeCode("test-model", {
-      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-    });
-    const mockSessionId = "test-session-abc-123";
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer } = makeSessionCaptureFactory(
-      hostDir,
-      async (repoDir) => {
-        // Write a session JSONL file into the sandbox's session store location
-        const encoded = encodeProjectPath(repoDir);
-        const sessionsDir = join(sandboxProjectsDir, encoded);
-        // Since our sandbox IS the filesystem, write the session file at the
-        // expected sandbox path (the handle's copyFileOut will just do a fs copy)
-        await mkdir(sessionsDir, { recursive: true });
-        await writeFile(
-          join(sessionsDir, `${mockSessionId}.jsonl`),
-          // Use sandbox cwd (repoDir) — transferClaudeSession should rewrite to host cwd
-          [
-            JSON.stringify({ type: "system", cwd: repoDir }),
-            JSON.stringify({ type: "message", cwd: repoDir, text: "hello" }),
-          ].join("\n"),
-        );
-        return "Done. <promise>COMPLETE</promise>";
-      },
-      mockSessionId,
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    // Verify iteration result
-    expect(result.iterations.length).toBe(1);
-    expect(result.iterations[0]!.sessionId).toBe(mockSessionId);
-    expect(result.iterations[0]!.sessionFilePath).toBeDefined();
-
-    // Verify the captured file exists on the host
-    const capturedPath = result.iterations[0]!.sessionFilePath!;
-    const capturedContent = await readFile(capturedPath, "utf-8");
-    const lines = capturedContent.split("\n");
-
-    // Verify cwd was rewritten from sandbox cwd to host cwd
-    const firstEntry = JSON.parse(lines[0]!) as { cwd: string };
-    expect(firstEntry.cwd).toBe(hostDir);
-    const secondEntry = JSON.parse(lines[1]!) as { cwd: string; text: string };
-    expect(secondEntry.cwd).toBe(hostDir);
-    expect(secondEntry.text).toBe("hello");
-  });
-
-  it("skips capture for non-Claude agents (captureSessions: false)", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-nocapture-host-"));
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Use claudeCode with captureSessions: false to test the flag
-    // (Using claudeCode so the mock agent layer intercepts correctly)
-    const provider = claudeCode("test-model", { captureSessions: false });
-
-    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
-      makeMockAgentLayer(dir, async () => {
-        return "Done.";
-      }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    expect(result.iterations[0]!.sessionFilePath).toBeUndefined();
-  });
-
-  it("skips capture when no sessionId is extracted", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-nosession-host-"));
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Use default factory (no bindMountHandle, no session_id in stream)
-    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
-      makeMockAgentLayer(dir, async () => {
-        return "Done.";
-      }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider: testProvider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations.length).toBe(1);
-    expect(result.iterations[0]!.sessionId).toBeUndefined();
-    expect(result.iterations[0]!.sessionFilePath).toBeUndefined();
-  });
-
-  it("resumes a session: transfers JSONL to sandbox and passes --resume to agent", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-resume-host-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-resume-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-resume-sb-projects-"),
-    );
-    const provider = claudeCode("test-model", {
-      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-    });
-    const mockSessionId = "resume-session-xyz";
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Write a session JSONL on the host (simulating a prior capture)
-    const encoded = encodeProjectPath(hostDir);
-    const hostSessionsDir = join(hostProjectsDir, encoded);
-    await mkdir(hostSessionsDir, { recursive: true });
-    await writeFile(
-      join(hostSessionsDir, `${mockSessionId}.jsonl`),
-      [
-        JSON.stringify({ type: "system", cwd: hostDir }),
-        JSON.stringify({ type: "message", cwd: hostDir, text: "prior work" }),
-      ].join("\n"),
-    );
-
-    const { factoryLayer } = makeSessionCaptureFactory(
-      hostDir,
-      async (repoDir) => {
-        // Verify that the session JSONL was transferred into the sandbox
-        const sbEncoded = encodeProjectPath(repoDir);
-        const sbSessionPath = join(
-          sandboxProjectsDir,
-          sbEncoded,
-          `${mockSessionId}.jsonl`,
-        );
-        const content = await readFile(sbSessionPath, "utf-8");
-        const lines = content.split("\n");
-        // Verify cwd was rewritten from host to sandbox
-        const firstEntry = JSON.parse(lines[0]!) as { cwd: string };
-        expect(firstEntry.cwd).toBe(repoDir);
-
-        // Also write the new session file the agent would produce
-        const sessionsDir = join(sandboxProjectsDir, sbEncoded);
-        await mkdir(sessionsDir, { recursive: true });
-        await writeFile(
-          join(sessionsDir, `${mockSessionId}.jsonl`),
-          [
-            JSON.stringify({ type: "system", cwd: repoDir }),
-            JSON.stringify({
-              type: "message",
-              cwd: repoDir,
-              text: "continued work",
-            }),
-          ].join("\n"),
-        );
-
-        return "Done. <promise>COMPLETE</promise>";
-      },
-      mockSessionId,
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "continue working",
-        resumeSession: mockSessionId,
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    // Verify iteration result
-    expect(result.iterations.length).toBe(1);
-    expect(result.iterations[0]!.sessionId).toBe(mockSessionId);
-    expect(result.iterations[0]!.sessionFilePath).toBeDefined();
-
-    // Verify the captured file on host has rewritten cwd
-    const capturedPath = result.iterations[0]!.sessionFilePath!;
-    const capturedContent = await readFile(capturedPath, "utf-8");
-    const capturedLines = capturedContent.split("\n");
-    const entry = JSON.parse(capturedLines[0]!) as { cwd: string };
-    expect(entry.cwd).toBe(hostDir);
-  });
-
-  it("forks a session: passes --fork-session alongside --resume to claude", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-fork-host-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-fork-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-fork-sb-projects-"),
-    );
-    const provider = claudeCode("test-model", {
-      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-    });
-    const parentSessionId = "parent-session-xyz";
-    const childSessionId = "child-session-abc";
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    // Seed a parent session JSONL on the host so resumeIntoSandbox can transfer it.
-    const encoded = encodeProjectPath(hostDir);
-    const hostSessionsDir = join(hostProjectsDir, encoded);
-    await mkdir(hostSessionsDir, { recursive: true });
-    const parentSessionPath = join(hostSessionsDir, `${parentSessionId}.jsonl`);
-    const parentContent = [
-      JSON.stringify({ type: "system", cwd: hostDir }),
-      JSON.stringify({ type: "message", cwd: hostDir, text: "parent work" }),
-    ].join("\n");
-    await writeFile(parentSessionPath, parentContent);
-
-    // Custom factory that captures the agent command so we can assert on it.
-    // Mirrors makeSessionCaptureFactory but threads a capturedCommand back out.
-    const sandboxBaseDir = join(tmpdir(), `orch-fork-sandbox-${randomUUID()}`);
-    let capturedCommand = "";
-
-    const factoryLayer = Layer.succeed(SandboxFactory, {
-      withSandbox: <A, E, R>(
-        makeEffect: (
-          info: import("./SandboxFactory.js").SandboxInfo,
-          sandbox: SandboxService,
-        ) => Effect.Effect<A, E, R>,
-      ): Effect.Effect<
-        import("./SandboxFactory.js").WithSandboxResult<A>,
-        E | DockerError,
-        R
-      > =>
-        Effect.acquireUseRelease(
-          Effect.promise(async () => {
-            await rm(sandboxBaseDir, { recursive: true, force: true });
-            await execAsync(
-              `git worktree add -b "sandcastle/fork-test" "${sandboxBaseDir}" HEAD`,
-              { cwd: hostDir },
-            );
-          }),
-          () => {
-            const handle: BindMountSandboxHandle = {
-              worktreePath: sandboxBaseDir,
-              exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-              copyFileIn: async (hostPath, sandboxPath) => {
-                await mkdir(join(sandboxPath, ".."), { recursive: true });
-                await copyFile(hostPath, sandboxPath);
-              },
-              copyFileOut: async (sandboxPath, hostPath) => {
-                await mkdir(join(hostPath, ".."), { recursive: true });
-                await copyFile(sandboxPath, hostPath);
-              },
-              close: async () => {},
-            };
-
-            const real = makeLocalSandbox(sandboxBaseDir);
-            const sandbox: SandboxService = {
-              exec: (command, options) => {
-                if (command.startsWith("claude ") && options?.onLine) {
-                  capturedCommand = command;
-                  const onLine = options.onLine;
-                  return Effect.gen(function* () {
-                    // Emulate a fork: agent writes a NEW session JSONL under
-                    // a fresh session id, leaving the parent untouched.
-                    const cwd = options?.cwd ?? sandboxBaseDir;
-                    const sbEncoded = encodeProjectPath(cwd);
-                    const sessionsDir = join(sandboxProjectsDir, sbEncoded);
-                    yield* Effect.promise(() =>
-                      mkdir(sessionsDir, { recursive: true }),
-                    );
-                    yield* Effect.promise(() =>
-                      writeFile(
-                        join(sessionsDir, `${childSessionId}.jsonl`),
-                        [
-                          JSON.stringify({ type: "system", cwd }),
-                          JSON.stringify({
-                            type: "message",
-                            cwd,
-                            text: "forked work",
-                          }),
-                        ].join("\n"),
-                      ),
-                    );
-                    const streamOutput = toStreamJson(
-                      "Done. <promise>COMPLETE</promise>",
-                      childSessionId,
-                    );
-                    for (const line of streamOutput.split("\n")) {
-                      onLine(line);
-                    }
-                    return {
-                      stdout: streamOutput,
-                      stderr: "",
-                      exitCode: 0,
-                    };
-                  });
-                }
-                return real.exec(command, options);
-              },
-              copyIn: (hostPath, sandboxPath) =>
-                real.copyIn(hostPath, sandboxPath),
-              copyFileOut: (sandboxPath, hostPath) =>
-                real.copyFileOut(sandboxPath, hostPath),
-            };
-
-            return makeEffect(
-              {
-                hostWorktreePath: sandboxBaseDir,
-                sandboxRepoPath: sandboxBaseDir,
-                applyToHost: () => Effect.void,
-                bindMountHandle: handle,
-              },
-              sandbox,
-            ) as Effect.Effect<A, E | DockerError, R>;
-          },
-          () =>
-            Effect.promise(async () => {
-              await execAsync(
-                `git worktree remove "${sandboxBaseDir}" --force`,
-                { cwd: hostDir },
-              ).catch(() => {});
-            }),
-        ).pipe(
-          Effect.map((value) => ({ value, preservedWorktreePath: undefined })),
-        ),
-    });
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "branch off",
-        resumeSession: parentSessionId,
-        forkSession: true,
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    // The agent command should include both --resume <parent> and --fork-session.
-    expect(capturedCommand).toContain(`--resume '${parentSessionId}'`);
-    expect(capturedCommand).toContain("--fork-session");
-
-    // The iteration captured the CHILD session id, not the parent.
-    expect(result.iterations[0]!.sessionId).toBe(childSessionId);
-
-    // The parent JSONL on the host is untouched — fork must not overwrite it.
-    const parentAfter = await readFile(parentSessionPath, "utf-8");
-    expect(parentAfter).toBe(parentContent);
-
-    // A child session file was captured to the host under the child id.
-    const childCaptured = result.iterations[0]!.sessionFilePath!;
-    expect(childCaptured).toContain(`${childSessionId}.jsonl`);
-    const childContent = await readFile(childCaptured, "utf-8");
-    expect(childContent).toContain("forked work");
-  });
-
-  it("populates usage on IterationResult when session has assistant usage", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-usage-host-"));
-    const hostProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-usage-projects-"),
-    );
-    const sandboxProjectsDir = await mkdtemp(
-      join(tmpdir(), "orch-usage-sb-projects-"),
-    );
-    const provider = claudeCode("test-model", {
-      sessionStorage: { hostProjectsDir, sandboxProjectsDir },
-    });
-    const mockSessionId = "usage-session-123";
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const { factoryLayer } = makeSessionCaptureFactory(
-      hostDir,
-      async (repoDir) => {
-        const encoded = encodeProjectPath(repoDir);
-        const sessionsDir = join(sandboxProjectsDir, encoded);
-        await mkdir(sessionsDir, { recursive: true });
-        await writeFile(
-          join(sessionsDir, `${mockSessionId}.jsonl`),
-          [
-            JSON.stringify({
-              type: "system",
-              subtype: "init",
-              session_id: mockSessionId,
-            }),
-            JSON.stringify({
-              type: "assistant",
-              message: {
-                model: "claude-opus-4-8",
-                usage: {
-                  input_tokens: 3,
-                  cache_creation_input_tokens: 9294,
-                  cache_read_input_tokens: 8526,
-                  output_tokens: 458,
-                },
-              },
-            }),
-          ].join("\n"),
-        );
-        return "Done. <promise>COMPLETE</promise>";
-      },
-      mockSessionId,
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations[0]!.usage).toEqual({
-      inputTokens: 3,
-      cacheCreationInputTokens: 9294,
-      cacheReadInputTokens: 8526,
-      outputTokens: 458,
-    });
-  });
-
-  it("usage is undefined when captureSessions is false", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "orch-nousage-host-"));
-
-    await initRepo(hostDir);
-    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
-
-    const provider = claudeCode("test-model", { captureSessions: false });
-
-    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) =>
-      makeMockAgentLayer(dir, async () => {
-        return "Done.";
-      }),
-    );
-
-    const result = await Effect.runPromise(
-      orchestrate({
-        provider,
-        hostRepoDir: hostDir,
-        iterations: 1,
-        prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
-    );
-
-    expect(result.iterations[0]!.usage).toBeUndefined();
-  });
 });
 
 describe("Orchestrator signal (AbortSignal)", () => {
@@ -3881,7 +2486,7 @@ describe("Orchestrator completion timeout (hanging process)", () => {
     const real = makeLocalSandbox(sandboxDir);
     return {
       exec: (command, options) => {
-        if (command.startsWith("claude ") && options?.onLine) {
+        if (command.includes("bob run") && options?.onLine) {
           const onLine = options.onLine;
           return Effect.gen(function* () {
             for (const line of lines) {
@@ -3993,7 +2598,7 @@ describe("Orchestrator completion timeout (hanging process)", () => {
       const real = makeLocalSandbox(dir);
       return {
         exec: (command, options) => {
-          if (command.startsWith("claude ") && options?.onLine) {
+          if (command.includes("bob run") && options?.onLine) {
             const onLine = options.onLine;
             return Effect.gen(function* () {
               onLine(
