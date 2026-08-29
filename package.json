@@ -10,21 +10,9 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./sandboxes/docker": {
-      "import": "./dist/sandboxes/docker.js",
-      "types": "./dist/sandboxes/docker.d.ts"
-    },
-    "./sandboxes/vercel": {
-      "import": "./dist/sandboxes/vercel.js",
-      "types": "./dist/sandboxes/vercel.d.ts"
-    },
-    "./sandboxes/podman": {
-      "import": "./dist/sandboxes/podman.js",
-      "types": "./dist/sandboxes/podman.d.ts"
-    },
-    "./sandboxes/daytona": {
-      "import": "./dist/sandboxes/daytona.js",
-      "types": "./dist/sandboxes/daytona.d.ts"
+    "./sandboxes/fyre": {
+      "import": "./dist/sandboxes/fyre.js",
+      "types": "./dist/sandboxes/fyre.d.ts"
     },
     "./sandboxes/no-sandbox": {
       "import": "./dist/sandboxes/no-sandbox.js",
@@ -41,13 +29,7 @@
     "test:watch": "vitest",
     "typecheck": "tsgo --noEmit",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "prepare": "husky",
-    "release": "changeset publish",
-    "sandcastle": "npm run build && tsx .sandcastle/run.ts",
-    "test-podman": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-podman.ts",
-    "test-vercel": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-vercel.ts",
-    "test-interactive": "npm run build && tsx --env-file=.sandcastle/.env .sandcastle/test-interactive.ts"
+    "format:check": "prettier --check ."
   },
   "keywords": [
     "cli",

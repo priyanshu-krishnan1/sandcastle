@@ -7,11 +7,6 @@ import { join } from "node:path";
 import { styleText } from "node:util";
 
 import { Display } from "./Display.js";
-import { buildImage, removeImage } from "./DockerLifecycle.js";
-import {
-  buildImage as podmanBuildImage,
-  removeImage as podmanRemoveImage,
-} from "./PodmanLifecycle.js";
 import {
   scaffold,
   listTemplates,
@@ -27,7 +22,6 @@ import {
   hostHasDependency,
   getTemplateDependencies,
 } from "./InitService.js";
-import { defaultImageName } from "./sandboxes/docker.js";
 import type {
   AgentEntry,
   IssueTrackerEntry,
@@ -35,30 +29,6 @@ import type {
 } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
 import { VERSION } from "./version.js";
-
-// --- Shared options ---
-
-const imageNameOption = Options.text("image-name").pipe(
-  Options.withDescription("Docker image name"),
-  Options.optional,
-);
-
-const resolveImageName = (
-  cliFlag: Option.Option<string>,
-  cwd: string,
-): string => (cliFlag._tag === "Some" ? cliFlag.value : defaultImageName(cwd));
-
-// --- UID build-args ---
-
-/** Build-args that align the image UID/GID to the host (Linux/macOS). No-op on Windows. */
-const defaultUidBuildArgs = (): Record<string, string> => {
-  const args: Record<string, string> = {};
-  const uid = process.getuid?.();
-  const gid = process.getgid?.();
-  if (uid !== undefined) args.AGENT_UID = String(uid);
-  if (gid !== undefined) args.AGENT_GID = String(gid);
-  return args;
-};
 
 // --- Config directory check ---
 
@@ -103,7 +73,7 @@ const initModelOption = Options.text("model").pipe(
 );
 
 const sandboxOption = Options.text("sandbox").pipe(
-  Options.withDescription("Sandbox provider to use (e.g. docker, podman)"),
+  Options.withDescription("Sandbox provider to use (e.g. fyre, no-sandbox)"),
   Options.optional,
 );
 
@@ -123,13 +93,6 @@ const createLabelOption = Options.choice("create-label", [
 ]).pipe(
   Options.withDescription(
     'Whether to create the "Sandcastle" GitHub label (only meaningful with --issue-tracker github-issues)',
-  ),
-  Options.optional,
-);
-
-const buildImageOption = Options.choice("build-image", ["true", "false"]).pipe(
-  Options.withDescription(
-    "Whether to build the sandbox image now (ignored when --issue-tracker custom is selected)",
   ),
   Options.optional,
 );
@@ -156,31 +119,26 @@ const choiceToTriBool = (
 const initCommand = Command.make(
   "init",
   {
-    imageName: imageNameOption,
     template: templateOption,
     agent: agentOption,
     model: initModelOption,
     sandbox: sandboxOption,
     issueTracker: issueTrackerOption,
     createLabel: createLabelOption,
-    buildImage: buildImageOption,
     installTemplateDeps: installTemplateDepsOption,
   },
   ({
-    imageName: imageNameFlag,
     template,
     agent: agentFlag,
     model: modelFlag,
     sandbox: sandboxFlag,
     issueTracker: issueTrackerFlag,
     createLabel: createLabelFlag,
-    buildImage: buildImageFlag,
     installTemplateDeps: installTemplateDepsFlag,
   }) =>
     Effect.gen(function* () {
       const d = yield* Display;
       const cwd = process.cwd();
-      const imageName = resolveImageName(imageNameFlag, cwd);
 
       // Early validation of CLI flags before interactive prompts
       const templates = listTemplates();
@@ -225,7 +183,6 @@ const initCommand = Command.make(
       }
 
       const createLabelChoice = choiceToTriBool(createLabelFlag);
-      const buildImageChoice = choiceToTriBool(buildImageFlag);
       const installTemplateDepsChoice = choiceToTriBool(
         installTemplateDepsFlag,
       );
@@ -238,9 +195,7 @@ const initCommand = Command.make(
           }),
         );
 
-      // Tri-state confirm: CLI flag wins; otherwise prompt interactively (or
-      // fail fast in non-interactive mode naming the missing flag). Cancelling
-      // the prompt is treated as abort — same shape as the select prompts above.
+      // Tri-state confirm helper
       const resolveConfirmFlag = (params: {
         choice: Option.Option<boolean>;
         flag: string;
@@ -309,7 +264,7 @@ const initCommand = Command.make(
           ? modelFlag.value
           : selectedAgent.defaultModel;
 
-      // Resolve sandbox provider: CLI flag > interactive select (no default — user must choose)
+      // Resolve sandbox provider: CLI flag > interactive select
       const sandboxProviders = listSandboxProviders();
       let selectedSandboxProvider: SandboxProviderEntry;
       if (sandboxFlag._tag === "Some") {
@@ -337,7 +292,7 @@ const initCommand = Command.make(
         selectedSandboxProvider = getSandboxProvider(selected as string)!;
       }
 
-      // Resolve issue tracker: CLI flag > interactive select (already validated above)
+      // Resolve issue tracker: CLI flag > interactive select
       const issueTrackers = listIssueTrackers();
       let selectedIssueTracker: IssueTrackerEntry;
       if (issueTrackerFlag._tag === "Some") {
@@ -366,7 +321,7 @@ const initCommand = Command.make(
         selectedIssueTracker = getIssueTracker(selected as string)!;
       }
 
-      // Resolve template: CLI flag > interactive select (already validated above)
+      // Resolve template: CLI flag > interactive select
       let selectedTemplate: string;
       if (template._tag === "Some") {
         selectedTemplate = template.value;
@@ -393,8 +348,7 @@ const initCommand = Command.make(
         selectedTemplate = selected as string;
       }
 
-      // Offer to create the "Sandcastle" label on the repo (skip for non-GitHub issue trackers).
-      // CLI flag > interactive confirm. The flag is only meaningful for the github-issues tracker.
+      // Offer to create GitHub label
       let shouldCreateLabel = false;
       if (selectedIssueTracker.name === "github-issues") {
         shouldCreateLabel = yield* resolveConfirmFlag({
@@ -436,14 +390,10 @@ const initCommand = Command.make(
         ),
       );
 
-      // Detect the host package manager so the zod offer below and the next
-      // steps below both use the right install command.
+      // Detect host package manager
       const packageManager = yield* detectPackageManager(cwd);
 
-      // If the chosen template imports zod on the host (the planner templates
-      // build their <plan> output schema with it) and the host doesn't already
-      // declare it, offer to install it. Without this, the very first
-      // `npx tsx .sandcastle/main.ts` crashes with ERR_MODULE_NOT_FOUND.
+      // Offer to install zod if the template needs it
       if (getTemplateDependencies(selectedTemplate).includes("zod")) {
         const alreadyInstalled = yield* hostHasDependency(cwd, "zod");
         if (!alreadyInstalled) {
@@ -473,51 +423,7 @@ const initCommand = Command.make(
         }
       }
 
-      // Prompt user before building image. The custom issue tracker scaffolds
-      // an intentionally unfinished Dockerfile (the install block is a TODO),
-      // so there is nothing valid to build yet — skip the build prompt entirely
-      // (and silently ignore --build-image) and let the next steps point the
-      // user at the setup doc.
-      const providerLabel = selectedSandboxProvider.label;
-      if (selectedIssueTracker.name === "custom") {
-        yield* d.status(
-          "Init complete! Your custom issue tracker isn't configured yet — see the steps below before building.",
-          "success",
-        );
-      } else {
-        const shouldBuild = yield* resolveConfirmFlag({
-          choice: buildImageChoice,
-          flag: "--build-image",
-          promptMessage: `Build the default ${providerLabel} image now?`,
-          cancelMessage: "Build-image selection cancelled.",
-        });
-
-        if (shouldBuild) {
-          const containerfileDir = join(cwd, CONFIG_DIR);
-          if (selectedSandboxProvider.name === "podman") {
-            yield* d.spinner(
-              `Building ${providerLabel} image '${imageName}'...`,
-              podmanBuildImage(imageName, containerfileDir),
-            );
-          } else {
-            yield* d.spinner(
-              `Building ${providerLabel} image '${imageName}'...`,
-              buildImage(imageName, containerfileDir, {
-                buildArgs: defaultUidBuildArgs(),
-              }),
-            );
-          }
-          yield* d.status(
-            "Init complete! Image built successfully.",
-            "success",
-          );
-        } else {
-          yield* d.status(
-            `Init complete! Run \`sandcastle ${selectedSandboxProvider.cliNamespace} build-image\` to build the ${providerLabel} image later.`,
-            "success",
-          );
-        }
-      }
+      yield* d.status("Init complete!", "success");
 
       // Show template-specific next steps
       const nextSteps = getNextStepsLines(
@@ -533,152 +439,6 @@ const initCommand = Command.make(
     }),
 );
 
-// --- Build-image command ---
-
-const dockerfileOption = Options.file("dockerfile").pipe(
-  Options.withDescription(
-    "Path to a custom Dockerfile (build context will be the current working directory)",
-  ),
-  Options.optional,
-);
-
-const buildImageCommand = Command.make(
-  "build-image",
-  {
-    imageName: imageNameOption,
-    dockerfile: dockerfileOption,
-  },
-  ({ imageName: imageNameFlag, dockerfile }) =>
-    Effect.gen(function* () {
-      const d = yield* Display;
-      const cwd = process.cwd();
-      yield* requireConfigDir(cwd);
-
-      const imageName = resolveImageName(imageNameFlag, cwd);
-
-      const dockerfileDir = join(cwd, CONFIG_DIR);
-      const dockerfilePath =
-        dockerfile._tag === "Some" ? dockerfile.value : undefined;
-
-      yield* d.spinner(
-        `Building Docker image '${imageName}'...`,
-        buildImage(imageName, dockerfileDir, {
-          dockerfile: dockerfilePath,
-          buildArgs: defaultUidBuildArgs(),
-        }),
-      );
-
-      yield* d.status("Build complete!", "success");
-    }),
-);
-
-// --- Remove-image command ---
-
-const removeImageCommand = Command.make(
-  "remove-image",
-  {
-    imageName: imageNameOption,
-  },
-  ({ imageName: imageNameFlag }) =>
-    Effect.gen(function* () {
-      const d = yield* Display;
-      const cwd = process.cwd();
-
-      const imageName = resolveImageName(imageNameFlag, cwd);
-
-      yield* d.spinner(
-        `Removing Docker image '${imageName}'...`,
-        removeImage(imageName),
-      );
-      yield* d.status("Image removed.", "success");
-    }),
-);
-
-// --- Docker namespace command ---
-
-const dockerCommand = Command.make("docker", {}, () =>
-  Effect.gen(function* () {
-    const d = yield* Display;
-    yield* d.status(
-      "Docker sandbox commands. Use --help to see available subcommands.",
-      "info",
-    );
-  }),
-).pipe(Command.withSubcommands([buildImageCommand, removeImageCommand]));
-
-// --- Podman build-image command ---
-
-const containerfileOption = Options.file("containerfile").pipe(
-  Options.withDescription(
-    "Path to a custom Containerfile (build context will be the current working directory)",
-  ),
-  Options.optional,
-);
-
-const podmanBuildImageCommand = Command.make(
-  "build-image",
-  {
-    imageName: imageNameOption,
-    containerfile: containerfileOption,
-  },
-  ({ imageName: imageNameFlag, containerfile }) =>
-    Effect.gen(function* () {
-      const d = yield* Display;
-      const cwd = process.cwd();
-      yield* requireConfigDir(cwd);
-
-      const imageName = resolveImageName(imageNameFlag, cwd);
-
-      const containerfileDir = join(cwd, CONFIG_DIR);
-      const containerfilePath =
-        containerfile._tag === "Some" ? containerfile.value : undefined;
-      yield* d.spinner(
-        `Building Podman image '${imageName}'...`,
-        podmanBuildImage(imageName, containerfileDir, {
-          containerfile: containerfilePath,
-        }),
-      );
-
-      yield* d.status("Build complete!", "success");
-    }),
-);
-
-// --- Podman remove-image command ---
-
-const podmanRemoveImageCommand = Command.make(
-  "remove-image",
-  {
-    imageName: imageNameOption,
-  },
-  ({ imageName: imageNameFlag }) =>
-    Effect.gen(function* () {
-      const d = yield* Display;
-      const cwd = process.cwd();
-
-      const imageName = resolveImageName(imageNameFlag, cwd);
-
-      yield* d.spinner(
-        `Removing Podman image '${imageName}'...`,
-        podmanRemoveImage(imageName),
-      );
-      yield* d.status("Image removed.", "success");
-    }),
-);
-
-// --- Podman namespace command ---
-
-const podmanCommand = Command.make("podman", {}, () =>
-  Effect.gen(function* () {
-    const d = yield* Display;
-    yield* d.status(
-      "Podman sandbox commands. Use --help to see available subcommands.",
-      "info",
-    );
-  }),
-).pipe(
-  Command.withSubcommands([podmanBuildImageCommand, podmanRemoveImageCommand]),
-);
-
 // --- Root command ---
 
 const rootCommand = Command.make("sandcastle", {}, () =>
@@ -690,7 +450,7 @@ const rootCommand = Command.make("sandcastle", {}, () =>
 );
 
 export const sandcastle = rootCommand.pipe(
-  Command.withSubcommands([initCommand, dockerCommand, podmanCommand]),
+  Command.withSubcommands([initCommand]),
 );
 
 export const cli = Command.run(sandcastle, {

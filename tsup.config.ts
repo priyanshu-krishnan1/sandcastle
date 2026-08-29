@@ -9,10 +9,7 @@ export default defineConfig({
   entry: {
     index: "src/index.ts",
     main: "src/main.ts",
-    "sandboxes/docker": "src/sandboxes/docker.ts",
-    "sandboxes/podman": "src/sandboxes/podman.ts",
-    "sandboxes/vercel": "src/sandboxes/vercel.ts",
-    "sandboxes/daytona": "src/sandboxes/daytona.ts",
+    "sandboxes/fyre": "src/sandboxes/fyre.ts",
     "sandboxes/no-sandbox": "src/sandboxes/no-sandbox.ts",
   },
   format: ["esm"],
@@ -24,7 +21,7 @@ export default defineConfig({
   clean: true,
   dts: true,
   treeshake: true,
-  external: ["@vercel/sandbox", "@daytona/sdk"],
+  external: [],
   define: {
     __SANDCASTLE_VERSION__: JSON.stringify(pkg.version),
   },
