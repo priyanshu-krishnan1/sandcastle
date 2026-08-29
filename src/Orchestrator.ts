@@ -189,6 +189,13 @@ const invokeAgent = (
       });
 
       if (execResult.exitCode !== 0) {
+        // If the completion signal was already detected in the output, treat a
+        // non-zero exit as a clean finish. This handles the reboot case where
+        // the agent emits <promise>COMPLETE</promise> and then runs `sudo reboot`,
+        // causing the SSH connection to drop with exit 255.
+        if (completionDetected) {
+          return { result: resultText || accumulatedOutput, sessionId, usage };
+        }
         // Prefer stderr; fall back to resultText (from parsed stream events),
         // then to the tail of raw stdout (last 20 non-empty lines).
         let errorDetail = execResult.stderr;
