@@ -1,4 +1,5 @@
 export { run } from "./run.js";
+export { fyre } from "./sandboxes/fyre.js";
 export type {
   RunOptions,
   RunResult,
@@ -33,16 +34,6 @@ export type {
 } from "./createWorktree.js";
 export type { PromptArgs } from "./PromptArgumentSubstitution.js";
 export type { AgentStreamEvent } from "./AgentStreamEmitter.js";
-export {
-  transferClaudeSession,
-  transferCodexSession,
-  encodeProjectPath,
-  claudeHostSessionPath,
-  claudeSandboxSessionPath,
-  findClaudeSessionOnHost,
-  findCodexSessionOnHost,
-} from "./SessionStore.js";
-export type { HostSessionLookup } from "./SessionStore.js";
 export type { SandboxHooks } from "./SandboxLifecycle.js";
 export type { MountConfig } from "./MountConfig.js";
 export { Output, StructuredOutputError } from "./Output.js";
@@ -52,27 +43,15 @@ export type {
   OutputStringDefinition,
 } from "./Output.js";
 export { CwdError } from "./CwdError.js";
-export {
-  claudeCode,
-  codex,
-  copilot,
-  cursor,
-  opencode,
-  pi,
-  bob,
-} from "./AgentProvider.js";
+export { bob } from "./AgentProvider.js";
 export type {
   AgentProvider,
   AgentCommandOptions,
   PrintCommand,
-  ClaudeCodeOptions,
-  CodexOptions,
-  CopilotOptions,
-  CursorOptions,
-  OpenCodeOptions,
-  PiOptions,
   BobOptions,
 } from "./AgentProvider.js";
+export { fyreNative } from "./sandboxes/fyre.js";
+export type { FyreOptions, FyreNativeOptions } from "./sandboxes/fyre.js";
 export {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
