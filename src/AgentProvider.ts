@@ -90,6 +90,33 @@ export interface AgentProvider {
 // Bob-Shell agent provider
 // ---------------------------------------------------------------------------
 
+/** Coerce a possibly-missing/non-numeric field to a finite number, defaulting to 0. */
+const numOr0 = (v: unknown): number =>
+  typeof v === "number" && Number.isFinite(v) ? v : 0;
+
+/**
+ * Best-effort extraction of an IterationUsage from a `result` event's `stats`
+ * object. Field names are inferred from IBM's docs (task_id, total_tokens,
+ * input_tokens, output_tokens, cache metrics, duration_ms, session_costs,
+ * tool_calls) rather than confirmed against a live response, so every field
+ * defaults to 0 instead of throwing when a name doesn't match or `stats` is
+ * missing/malformed. Returns undefined only when there is no stats object at
+ * all, so callers can distinguish "no usage event" from "zeroed usage event".
+ */
+const extractBobUsage = (stats: unknown): ParsedStreamEvent | undefined => {
+  if (typeof stats !== "object" || stats === null) return undefined;
+  const s = stats as Record<string, unknown>;
+  return {
+    type: "usage",
+    usage: {
+      inputTokens: numOr0(s.input_tokens),
+      outputTokens: numOr0(s.output_tokens),
+      cacheCreationInputTokens: numOr0(s.cache_creation_input_tokens),
+      cacheReadInputTokens: numOr0(s.cache_read_input_tokens),
+    },
+  };
+};
+
 /**
  * Parse Bob-Shell output lines into Sandcastle events.
  * Bob-Shell outputs plain text by default, but may also output structured JSON.
@@ -100,10 +127,24 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
     try {
       const obj = JSON.parse(line);
 
-      // bob run --format stream-json emits:
-      //   {"type":"message","role":"assistant","content":"..."} — streamed text chunks
-      //   {"type":"result","status":"success","stats":{...}}    — final completion
-      //   {"type":"result","status":"error",...}                — failure
+      // Real `bob run --format stream-json` (Bob-Shell 2.0) event vocabulary,
+      // confirmed from IBM's docs:
+      //   {"type":"message","role":...,"content":"...","isReasoning":bool}
+      //   {"type":"tool_use","tool_name":"...","tool_id":"...","parameters":{...}}
+      //   {"type":"tool_result","tool_id":"...","status":"...","output"|"error":"..."}
+      //   {"type":"error","severity":"...","message":"..."}
+      //   {"type":"result","status":"success"|"error","last_message":"...","stats":{...}}
+
+      if (obj.type === "message" && obj.role === "assistant" && obj.isReasoning === true) {
+        // Reasoning content (chain-of-thought style commentary) is dropped
+        // entirely — same treatment as the non-assistant-role guard below.
+        // Reasoning text can plausibly mention or quote the completion signal
+        // string (e.g. "once I see <promise>COMPLETE</promise> I'm done")
+        // without the agent actually asserting completion; letting it into
+        // onText/accumulatedOutput would let the signal-matching in
+        // Orchestrator.ts fire on a thought rather than a real assertion.
+        return [];
+      }
 
       if (obj.type === "message" && obj.role === "assistant" && typeof obj.content === "string") {
         return [{ type: "text", text: obj.content }];
@@ -120,12 +161,65 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
         return [];
       }
 
+      // tool_use / tool_result: Bob 2.0's actual tool-call event pair. These
+      // must NEVER fall through to the raw-JSON-as-text default below — a
+      // tool call that writes a prompt file, or greps for the completion
+      // marker, can easily carry the literal signal string in its parameters
+      // or output, which would otherwise fabricate a completion the agent
+      // never asserted. Mapped onto the existing "tool_call" event so they
+      // render via onToolCall (never onText/accumulatedOutput).
+      if (obj.type === "tool_use" && typeof obj.tool_name === "string") {
+        return [
+          {
+            type: "tool_call",
+            name: obj.tool_name,
+            args:
+              obj.parameters !== undefined ? JSON.stringify(obj.parameters) : "",
+          },
+        ];
+      }
+
+      if (obj.type === "tool_result") {
+        // Mirror tool_use's parameters handling: a structured (non-string)
+        // output/error must not be silently dropped to "" — that leaves the
+        // log with no visibility into what the tool actually returned.
+        const detail =
+          typeof obj.output === "string"
+            ? obj.output
+            : typeof obj.error === "string"
+              ? obj.error
+              : obj.output !== undefined
+                ? JSON.stringify(obj.output)
+                : obj.error !== undefined
+                  ? JSON.stringify(obj.error)
+                  : "";
+        return [{ type: "tool_call", name: "tool_result", args: detail }];
+      }
+
+      // Top-level {"type":"error"} event. Deliberate divergence from a literal
+      // reading of "error" as assistant-produced message text: routed through
+      // the tool_call channel (onToolCall) rather than text (onText/
+      // accumulatedOutput) so it stays visible for debugging without ever
+      // being eligible to match the completion signal.
+      if (obj.type === "error") {
+        const msg = typeof obj.message === "string" ? obj.message : "bob error";
+        return [{ type: "tool_call", name: "error", args: msg }];
+      }
+
       if (obj.type === "result") {
+        const usageEvent = extractBobUsage(obj.stats);
         if (obj.status === "success") {
-          if (typeof obj.result === "string") {
+          const text =
+            typeof obj.last_message === "string"
+              ? obj.last_message
+              : typeof obj.result === "string"
+                ? obj.result
+                : undefined;
+          if (text !== undefined) {
             return [
-              { type: "text", text: obj.result },
-              { type: "result", result: obj.result },
+              { type: "text", text },
+              { type: "result", result: text },
+              ...(usageEvent ? [usageEvent] : []),
             ];
           }
           // bob run --format stream-json emits {"type":"result","status":"success","stats":{...}}
@@ -138,19 +232,29 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
           // <promise>COMPLETE</promise>, causing Orchestrator.ts to report the
           // iteration — and any phase gated on it — as successfully complete
           // even though the actual task was never finished or verified.
-          // Emit nothing; the real signal-matching logic in Orchestrator.ts
-          // only fires if the agent's own assistant-message text already
-          // contains the completion signal.
-          return [];
+          // Emit nothing but the usage extraction; the real signal-matching
+          // logic in Orchestrator.ts only fires if the agent's own
+          // assistant-message text already contains the completion signal.
+          return usageEvent ? [usageEvent] : [];
         }
-        // error status — surface as plain text so it appears in logs
+        // error status — route through the tool_call channel (see the
+        // top-level {"type":"error"} comment above) rather than text, so a
+        // failure result can never be mistaken for a real assistant message
+        // eligible for completion-signal matching. Orchestrator.ts's own
+        // exit-code path is what actually fails the run.
         if (obj.status === "error") {
           const msg = typeof obj.error === "string" ? obj.error : "bob run failed";
-          return [{ type: "text", text: msg }];
+          return [
+            { type: "tool_call", name: "error", args: msg },
+            ...(usageEvent ? [usageEvent] : []),
+          ];
         }
       }
 
-      // Handle tool calls
+      // Legacy/defensive: an assumed Bob-Shell 1.x-shaped {"type":"tool_call"}
+      // event. Bob 2.0 never emits this (it uses tool_use/tool_result above),
+      // but the shape is kept as a harmless additional match in case a caller
+      // is fronting a different Bob-Shell version.
       if (obj.type === "tool_call" && typeof obj.name === "string") {
         return [
           {
@@ -161,7 +265,10 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
         ];
       }
 
-      // Handle session ID if Bob supports it
+      // Legacy/defensive: an assumed {"type":"session_id"} event. Bob 2.0's
+      // real protocol has no such event (see AgentSessionStorage comment on
+      // the `bob()` factory below for why session resume isn't wired at all);
+      // kept only as a harmless additional match.
       if (obj.type === "session_id" && typeof obj.sessionId === "string") {
         return [{ type: "session_id", sessionId: obj.sessionId }];
       }
@@ -178,7 +285,12 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
 export interface BobOptions {
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
-  /** Bob-Shell model or configuration to use */
+  /**
+   * Bob-Shell mode to use. Despite the field name (kept for backwards
+   * compatibility with the positional `model` argument on `bob()`), this is
+   * rendered as `bob run`'s `--mode` flag, not `--model` — Bob 2.0's `run`
+   * command has no `--model` flag.
+   */
   readonly model?: string;
   /**
    * Shell snippet prepended to every bob command before the install check.
@@ -190,6 +302,34 @@ export interface BobOptions {
    * setupScript: 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"'
    */
   readonly setupScript?: string;
+  /** Rendered as `bob run --max-turns <n>`, capping the number of agent turns per invocation. */
+  readonly maxTurns?: number;
+  /** Rendered as `bob run --max-cost <n>`, capping spend (in bobcoins) per invocation. */
+  readonly maxCost?: number;
+  /**
+   * Rendered as `bob run --disable-tool-groups <a,b,...>`. Valid groups per
+   * Bob's CLI: read, edit, execute, mcp, skill, todo, subagent, mode.
+   */
+  readonly disableToolGroups?: string[];
+  /** Rendered as `bob run --disable-mcp`. */
+  readonly disableMcp?: boolean;
+  /** Rendered as `bob run --disable-subagents`. */
+  readonly disableSubagents?: boolean;
+  /** Rendered as `bob run --workspace <path>`. */
+  readonly workspace?: string;
+  /**
+   * Rendered as `bob run --trust`. Defaults to `true`: bob runs headless
+   * inside an ephemeral or remote sandbox with no human present to answer a
+   * first-run trust prompt, and an unanswered prompt would otherwise hang
+   * until the idle timeout. Pass `false` explicitly to restore the prompt.
+   */
+  readonly trust?: boolean;
+  /**
+   * Rendered as `bob run --accept-license`. Defaults to `true` for the same
+   * headless-hang reason as `trust` above. Pass `false` explicitly to restore
+   * the prompt.
+   */
+  readonly acceptLicense?: boolean;
 }
 
 /**
@@ -214,16 +354,84 @@ export const bob = (model: string, options?: BobOptions): AgentProvider => {
   // Prefer explicit options.model over the positional model argument.
   const resolvedModel = options?.model ?? model;
 
+  // Defaults mirror bob's non-interactive CLI expectations: with no human
+  // present to answer a first-run trust/license prompt, an unanswered prompt
+  // hangs until the idle timeout. See the BobOptions doc comments.
+  const trust = options?.trust ?? true;
+  const acceptLicense = options?.acceptLicense ?? true;
+
+  // Flags shared between the headless (buildPrintCommand) and interactive
+  // (buildInteractiveArgs) paths: mode, budget caps, tool-group and MCP/
+  // subagent restrictions, workspace override, and resume. Kept as a single
+  // source of truth so a new option can't be added to one path and silently
+  // missed on the other (as maxTurns/maxCost/disableToolGroups/disableMcp/
+  // disableSubagents/workspace/resumeSession originally were on
+  // buildInteractiveArgs). `escape` marks free-text values that need shell
+  // quoting in buildPrintCommand — buildInteractiveArgs ignores it since argv
+  // array entries never pass through a shell. --trust/--accept-license are
+  // intentionally NOT included here — see the comment on buildInteractiveArgs
+  // below.
+  const collectSharedArgs = (
+    resumeSession?: string,
+  ): { readonly flag: string; readonly value?: string; readonly escape?: boolean }[] => {
+    const args: { flag: string; value?: string; escape?: boolean }[] = [];
+    if (resolvedModel && resolvedModel !== "default") {
+      args.push({ flag: "--mode", value: resolvedModel, escape: true });
+    }
+    if (options?.maxTurns !== undefined) {
+      args.push({ flag: "--max-turns", value: String(options.maxTurns) });
+    }
+    if (options?.maxCost !== undefined) {
+      args.push({ flag: "--max-cost", value: String(options.maxCost) });
+    }
+    if (options?.disableToolGroups && options.disableToolGroups.length > 0) {
+      args.push({
+        flag: "--disable-tool-groups",
+        value: options.disableToolGroups.join(","),
+        escape: true,
+      });
+    }
+    if (options?.disableMcp) {
+      args.push({ flag: "--disable-mcp" });
+    }
+    if (options?.disableSubagents) {
+      args.push({ flag: "--disable-subagents" });
+    }
+    if (options?.workspace !== undefined) {
+      args.push({ flag: "--workspace", value: options.workspace, escape: true });
+    }
+    if (resumeSession !== undefined) {
+      args.push({ flag: "--resume", value: resumeSession, escape: true });
+    }
+    return args;
+  };
+
   return {
   name: "bob",
   env: options?.env ?? {},
   captureSessions: false,
+  // No `sessionStorage` declared: per ADR 0016, resume support requires a
+  // filesystem-backed session record Sandcastle can copy verbatim (as Claude
+  // Code, Codex, and Pi have). Bob's session model is a remote task-id
+  // (`--resume <task-id>` / `--resume latest`), not a file Sandcastle can
+  // read/transfer/rewrite — the same category as OpenCode's SQLite store,
+  // which ADR 0016 explicitly leaves unresumable. `--resume` is still wired
+  // into buildPrintCommand below (see AgentCommandOptions.resumeSession) so
+  // the CLI plumbing exists for when/if a filesystem-backed approach is
+  // designed; it is a harmless no-op today since nothing sets
+  // `resumeSession` for a provider with no `sessionStorage`.
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
-    const modeFlag =
-      resolvedModel && resolvedModel !== "default"
-        ? ` --mode ${shellEscape(resolvedModel)}`
-        : "";
+  buildPrintCommand({ prompt, resumeSession }: AgentCommandOptions): PrintCommand {
+    const flagParts = collectSharedArgs(resumeSession)
+      .concat(
+        trust ? [{ flag: "--trust" }] : [],
+        acceptLicense ? [{ flag: "--accept-license" }] : [],
+      )
+      .map(({ flag, value, escape }) =>
+        value === undefined ? flag : `${flag} ${escape ? shellEscape(value) : value}`,
+      )
+      .join(" ");
+    const flags = flagParts ? ` ${flagParts}` : "";
 
     // Optional setup snippet (e.g. sourcing nvm) runs first so Node/bob are
     // on PATH before the install check executes.
@@ -244,16 +452,21 @@ export const bob = (model: string, options?: BobOptions): AgentProvider => {
     const rehashPath = `export PATH="$(npm root -g 2>/dev/null | sed 's|/node_modules$|/bin|'):$PATH"`;
 
     return {
-      command: `${setupPrefix}${installCheck} && ${rehashPath} && bob run --format stream-json${modeFlag}`,
+      command: `${setupPrefix}${installCheck} && ${rehashPath} && bob run --format stream-json${flags}`,
       stdin: prompt,
     };
   },
 
-  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+  buildInteractiveArgs({ prompt, resumeSession }: AgentCommandOptions): string[] {
+    // Deliberately excludes --trust/--accept-license: those exist only to
+    // skip a first-run prompt when nothing is present to answer it headlessly
+    // (see BobOptions doc comments). An interactive session has a human at
+    // the terminal who should see and answer that prompt themselves, not
+    // have it silently auto-accepted on their behalf.
     const args = ["bob", "run"];
-
-    if (resolvedModel && resolvedModel !== "default") {
-      args.push("--mode", resolvedModel);
+    for (const { flag, value } of collectSharedArgs(resumeSession)) {
+      args.push(flag);
+      if (value !== undefined) args.push(value);
     }
 
     if (prompt) {

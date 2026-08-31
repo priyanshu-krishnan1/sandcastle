@@ -141,10 +141,22 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
 
         // Only review if the implementer produced commits
         if (implement.commits.length > 0) {
+          // review-prompt.md tells the reviewer to make fixes directly on
+          // the branch and to run tests/type checking to verify them, so
+          // the `edit` and `execute` tool groups stay enabled — disabling
+          // either would break the documented review workflow, not just
+          // narrow it.
+          //
+          // `disableSubagents` is set instead: each issue already gets its
+          // own sandbox/branch, run concurrently via Promise.allSettled
+          // below — that's the fan-out this template relies on. Letting the
+          // reviewer additionally spawn subagents inside Bob would nest
+          // concurrency inside a stage that reviews a single branch, adding
+          // cost without a matching unit of isolation.
           const review = await sandbox.run({
             name: "reviewer",
             maxIterations: 1,
-            agent: sandcastle.bob("default"),
+            agent: sandcastle.bob("default", { disableSubagents: true }),
             promptFile: "./.sandcastle/review-prompt.md",
             promptArgs: {
               BRANCH: issue.branch,

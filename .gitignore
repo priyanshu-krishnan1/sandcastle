@@ -4,3 +4,5 @@ dist
 .vercel
 .claude/settings.local.json.bob/
 .sandcastle
+db2-orch-purescale
+db2-arm-orch

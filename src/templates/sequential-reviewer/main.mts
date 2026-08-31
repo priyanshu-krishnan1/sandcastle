@@ -99,11 +99,22 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     // A second agent reviews the diff of the branch produced by
     // Phase 1. It uses the {{BRANCH}} prompt argument to inspect the right
     // branch, and either approves or makes corrections directly on the branch.
-    // -----------------------------------------------------------------------
+    //
+    // review-prompt.md tells the reviewer to make fixes directly on the
+    // branch and to run tests/type checking to verify them, so the `edit`
+    // and `execute` tool groups stay enabled — disabling either would break
+    // the documented review workflow, not just narrow it.
+    //
+    // `disableSubagents` is set instead: this stage reviews one branch at a
+    // time, and Sandcastle already owns the only fan-out this template does
+    // (one sandbox/branch per outer iteration). Letting the reviewer spawn
+    // its own subagents would add nested concurrency with no matching unit
+    // of isolation, for no benefit over the single-threaded review a branch
+    // diff calls for.
     await sandbox.run({
       name: "reviewer",
       maxIterations: 1,
-      agent: sandcastle.bob("default"),
+      agent: sandcastle.bob("default", { disableSubagents: true }),
       promptFile: "./.sandcastle/review-prompt.md",
       promptArgs: {
         BRANCH: branch,
