@@ -214,6 +214,60 @@ describe("FileDisplay", () => {
 
   const readLog = (logPath: string) => readFileSync(logPath, "utf-8");
 
+  it("preserves order when chunks are fired without being awaited", async () => {
+    // Reproduces how Orchestrator.ts drives the log: the text-delta buffer is a
+    // synchronous callback, so it calls Effect.runPromise(display.textChunk(..))
+    // and moves on without awaiting. With async appends, concurrent writes
+    // landed in completion order and the log came out scrambled — which was
+    // then read as evidence that the *agent* had emitted garbled output.
+    const { logPath, layer } = setup();
+
+    const chunks = Array.from({ length: 200 }, (_, i) => `[chunk-${i}]`);
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const d = yield* Display;
+        yield* Effect.sync(() => {
+          for (const chunk of chunks) {
+            // Deliberately not awaited — this is the production call pattern.
+            void Effect.runPromise(d.textChunk(chunk));
+          }
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    const log = readLog(logPath);
+    const seen = log.match(/\[chunk-\d+\]/g) ?? [];
+    expect(seen).toEqual(chunks);
+  });
+
+  it("keeps interleaved status lines and raw chunks in call order", async () => {
+    // status/toolCall go through a different append path than textChunk, and
+    // both mutate the shared `midLine` flag. Async writes let those two paths
+    // race each other as well as themselves.
+    const { logPath, layer } = setup();
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const d = yield* Display;
+        yield* Effect.sync(() => {
+          for (let i = 0; i < 50; i++) {
+            void Effect.runPromise(d.textChunk(`text-${i} `));
+            void Effect.runPromise(d.status(`status-${i}`, "info"));
+          }
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    const log = readLog(logPath);
+    const seen = log.match(/(?:text|status)-\d+/g) ?? [];
+    const expected: string[] = [];
+    for (let i = 0; i < 50; i++) {
+      expected.push(`text-${i}`, `status-${i}`);
+    }
+    expect(seen).toEqual(expected);
+  });
+
   it("intro is a no-op (only delimiter in log)", async () => {
     const { logPath, layer } = setup();
 

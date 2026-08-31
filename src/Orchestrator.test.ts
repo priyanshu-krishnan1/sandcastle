@@ -1071,14 +1071,17 @@ describe("Orchestrator error handling", () => {
     expect(exit._tag).toBe("Failure");
   });
 
-  it("falls back to stdout when stream has no result line", async () => {
+  it("does not complete from a signal that appears only in raw stdout", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-fallback-host-"));
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    // Layer where agent stream emits only assistant lines, no result line.
-    // stdout contains the completion signal so the fallback path picks it up.
+    // Layer where the agent stream emits only assistant lines the parser does
+    // not surface as text, so the signal exists solely in raw stdout. Raw
+    // stdout is not a completion source: it carries lines the parser drops,
+    // including the agent echoing back the prompt — and the prompt is where
+    // the signal is defined. See Orchestrator.completionSignal.test.ts.
     const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
       hostDir,
       (dir) => {
@@ -1113,16 +1116,17 @@ describe("Orchestrator error handling", () => {
         provider: testProvider,
         hostRepoDir: hostDir,
 
-        iterations: 5,
+        iterations: 2,
 
         prompt: "do some work",
       }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
     );
 
-    // Should detect COMPLETE from the stdout fallback
-    expect(result.iterations.length).toBe(1);
-    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
-  });
+    // The signal never reached the parsed stream, so the run is not complete
+    // and the orchestrator works through its full iteration budget.
+    expect(result.completionSignal).toBeUndefined();
+    expect(result.iterations.length).toBe(2);
+  }, 30000);
 
   it("preserves iteration 1 work when agent fails on iteration 2", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-partial-host-"));

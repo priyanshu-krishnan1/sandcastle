@@ -1,5 +1,6 @@
 import * as clack from "@clack/prompts";
 import { FileSystem } from "@effect/platform";
+import { appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Context, Effect, Layer, Ref } from "effect";
 import { styleText } from "node:util";
@@ -163,22 +164,34 @@ export const FileDisplay = {
         // status, context-window summaries) off the tail of streamed prose.
         let midLine = false;
 
+        // Log appends are synchronous, and deliberately so. Callers fire
+        // these effects without awaiting them (see the text-delta buffer in
+        // Orchestrator.ts), so an async append lets concurrent writes complete
+        // out of order: the log then shows the agent's output interleaved and
+        // scrambled, and `midLine` — mutated by every write — desyncs as well.
+        // A scrambled log is worse than no log, because it is read as evidence.
+        // Sync appends also keep this writer ordered against the verbose
+        // raw-line sink in run.ts, which appends to the same file the same way.
+        const appendSync = (text: string): void => {
+          try {
+            appendFileSync(filePath, text);
+          } catch {
+            // Swallow — logging must never take the run down.
+          }
+        };
+
         const appendToLog = (line: string): Effect.Effect<void> =>
-          Effect.suspend(() => {
+          Effect.sync(() => {
             const prefix = midLine ? "\n" : "";
             midLine = false;
-            return fs
-              .writeFileString(filePath, `${prefix}${line}\n`, { flag: "a" })
-              .pipe(Effect.ignore);
+            appendSync(`${prefix}${line}\n`);
           });
 
         const appendRaw = (chunk: string): Effect.Effect<void> =>
-          Effect.suspend(() => {
-            if (chunk.length === 0) return Effect.void;
+          Effect.sync(() => {
+            if (chunk.length === 0) return;
             midLine = !chunk.endsWith("\n");
-            return fs
-              .writeFileString(filePath, chunk, { flag: "a" })
-              .pipe(Effect.ignore);
+            appendSync(chunk);
           });
 
         return {

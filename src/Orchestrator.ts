@@ -1,4 +1,4 @@
-import { Deferred, Duration, Effect, Fiber } from "effect";
+import { Deferred, Duration, Effect, Fiber, Schedule } from "effect";
 import { AgentStreamEmitter } from "./AgentStreamEmitter.js";
 import { Display } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
@@ -19,6 +19,23 @@ export type { ParsedStreamEvent, IterationUsage } from "./AgentProvider.js";
 
 const IDLE_WARNING_INTERVAL_MS = 60_000;
 
+/**
+ * What one agent invocation hands back to the orchestrator.
+ *
+ * `completionSignal` is the signal matched against the *parsed* stream
+ * (`accumulatedOutput`) — never against raw stdout. Raw stdout contains lines
+ * the provider's parser deliberately drops, notably the agent echoing the
+ * prompt it was given, and the prompt is exactly where the completion signal
+ * is defined. Re-scanning `result` downstream would match that echo and report
+ * a completion the agent never made.
+ */
+interface AgentInvocationResult {
+  readonly result: string;
+  readonly sessionId?: string;
+  readonly usage?: IterationUsage;
+  readonly completionSignal?: string;
+}
+
 const invokeAgent = (
   sandbox: SandboxService,
   sandboxRepoDir: string,
@@ -36,10 +53,7 @@ const invokeAgent = (
   resumeSession?: string,
   forkSession?: boolean,
   signal?: AbortSignal,
-): Effect.Effect<
-  { result: string; sessionId?: string; usage?: IterationUsage },
-  SandboxError
-> =>
+): Effect.Effect<AgentInvocationResult, SandboxError> =>
   Effect.gen(function* () {
     let resultText = "";
     let sessionId: string | undefined;
@@ -56,11 +70,12 @@ const invokeAgent = (
     // hand control back to the orchestrator with the buffered output, which
     // still contains the signal so the existing completionSignal check works.
     const completionTimeoutDeferred = yield* Deferred.make<
-      { result: string; sessionId?: string; usage?: IterationUsage },
+      AgentInvocationResult,
       never
     >();
     let timeoutFiber: Fiber.RuntimeFiber<unknown, unknown> | null = null;
     let completionDetected = false;
+    let matchedSignal: string | undefined;
 
     // Periodic idle warning state
     let warningFiber: Fiber.RuntimeFiber<unknown, unknown> | null = null;
@@ -98,6 +113,7 @@ const invokeAgent = (
               result: resultText || accumulatedOutput,
               sessionId,
               usage,
+              completionSignal: matchedSignal,
             });
           }),
         );
@@ -174,13 +190,16 @@ const invokeAgent = (
           // Check for the completion signal AFTER parsing this line so the
           // accumulator contains everything seen so far. Flip to the
           // completion-grace timer the first time the signal appears.
-          if (
-            !completionDetected &&
-            completionSignals.some((sig) => accumulatedOutput.includes(sig))
-          ) {
-            completionDetected = true;
-            interruptFiber(warningFiber);
-            warningFiber = null;
+          if (!completionDetected) {
+            const found = completionSignals.find((sig) =>
+              accumulatedOutput.includes(sig),
+            );
+            if (found !== undefined) {
+              completionDetected = true;
+              matchedSignal = found;
+              interruptFiber(warningFiber);
+              warningFiber = null;
+            }
           }
           resetTimer();
         },
@@ -194,7 +213,12 @@ const invokeAgent = (
         // the agent emits <promise>COMPLETE</promise> and then runs `sudo reboot`,
         // causing the SSH connection to drop with exit 255.
         if (completionDetected) {
-          return { result: resultText || accumulatedOutput, sessionId, usage };
+          return {
+            result: resultText || accumulatedOutput,
+            sessionId,
+            usage,
+            completionSignal: matchedSignal,
+          };
         }
         // Prefer stderr; fall back to resultText (from parsed stream events),
         // then to the tail of raw stdout (last 20 non-empty lines).
@@ -213,7 +237,12 @@ const invokeAgent = (
         );
       }
 
-      return { result: resultText || execResult.stdout, sessionId, usage };
+      return {
+        result: resultText || execResult.stdout,
+        sessionId,
+        usage,
+        completionSignal: matchedSignal,
+      };
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {
@@ -226,7 +255,7 @@ const invokeAgent = (
     );
 
     let raced: Effect.Effect<
-      { result: string; sessionId?: string; usage?: IterationUsage },
+      AgentInvocationResult,
       AgentIdleTimeoutError | SandboxError
     > = Effect.raceFirst(execEffect, Deferred.await(timeoutSignal));
     raced = Effect.raceFirst(raced, Deferred.await(completionTimeoutDeferred));
@@ -294,6 +323,19 @@ export interface OrchestrateOptions {
   readonly timeouts?: Timeouts;
   /** Forwarded to `withSandboxLifecycle` — see `SandboxLifecycleOptions.keepSourceBranch`. */
   readonly keepSourceBranch?: boolean;
+  /**
+   * Number of additional attempts per iteration when the agent fails with an
+   * `AgentError` or `AgentIdleTimeoutError`. Each retry spins up a completely
+   * fresh sandbox (the same path as a normal next iteration), so sandbox
+   * lifecycle is unaffected. A value of `0` (default) means no retries — fail
+   * immediately on first error. A value of `2` means up to 3 total attempts
+   * per iteration.
+   *
+   * Only `AgentError` and `AgentIdleTimeoutError` are retried. Errors from
+   * sandbox setup, git operations, or lifecycle hooks are never retried because
+   * they are structural failures that a repeat attempt cannot fix.
+   */
+  readonly iterationRetries?: number;
 }
 
 /** Per-iteration result carrying an optional session ID. */
@@ -330,6 +372,7 @@ export const orchestrate = (
   const completionTimeoutMs =
     (options.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) *
     1000;
+  const maxRetries = options.iterationRetries ?? 0;
   return Effect.gen(function* () {
     const factory = yield* SandboxFactory;
     const display = yield* Display;
@@ -363,7 +406,14 @@ export const orchestrate = (
       yield* checkAbort();
       yield* display.status(label(`Iteration ${i}/${iterations}`), "info");
 
-      const sandboxResult = yield* factory.withSandbox(
+      // Retry budget per iteration: only AgentError and AgentIdleTimeoutError
+      // are eligible. Sandbox setup, git, and lifecycle failures are structural
+      // and are never retried. Each retry creates a fresh sandbox (same path as
+      // a normal iteration) so sandbox lifecycle is completely unaffected.
+      let retryAttempt = 0;
+      // Assign to inferred type — explicit annotation would fight the nested
+      // SandboxLifecycleResult<WithSandboxResult<...>> wrapping.
+      const iterationEffect = factory.withSandbox(
         (
           { hostWorktreePath, sandboxRepoPath, applyToHost, bindMountHandle },
           sandbox,
@@ -482,6 +532,7 @@ export const orchestrate = (
                   result: agentOutput,
                   sessionId,
                   usage: streamUsage,
+                  completionSignal: matchedSignal,
                 } = yield* invokeAgent(
                   ctx.sandbox,
                   ctx.sandboxRepoDir,
@@ -551,10 +602,12 @@ export const orchestrate = (
                   }
                 }
 
-                // Check completion signal
-                const matchedSignal = completionSignals.find((sig) =>
-                  agentOutput.includes(sig),
-                );
+                // The completion signal comes from invokeAgent, which
+                // matched it against the parsed stream. Do not re-scan
+                // `agentOutput` here: it falls back to raw stdout, which
+                // carries the agent's echo of the prompt — and the prompt
+                // contains the signal, so re-scanning reports completion the
+                // agent never signalled.
                 return {
                   completionSignal: matchedSignal,
                   stdout: agentOutput,
@@ -564,6 +617,37 @@ export const orchestrate = (
                 } as const;
               }),
           ),
+      );
+      // Attach retry logic outside the factory.withSandbox call so the error
+      // type is visible. tapError logs before each retried attempt; retry
+      // re-runs the entire sandbox creation + agent invocation.
+      const sandboxResult = yield* iterationEffect.pipe(
+        Effect.tapError((e: SandboxError) => {
+          if (
+            retryAttempt >= maxRetries ||
+            (e._tag !== "AgentError" && e._tag !== "AgentIdleTimeoutError")
+          ) {
+            return Effect.void;
+          }
+          retryAttempt++;
+          const reason =
+            e._tag === "AgentIdleTimeoutError"
+              ? "Agent idle timeout"
+              : `Agent failed: ${e.message.split("\n")[0]}`;
+          return display.status(
+            label(
+              `${reason} (attempt ${retryAttempt}/${maxRetries + 1}). Retrying…`,
+            ),
+            "warn",
+          );
+        }),
+        Effect.retry({
+          while: (e: SandboxError) =>
+            (e._tag === "AgentError" || e._tag === "AgentIdleTimeoutError") &&
+            retryAttempt <= maxRetries,
+          times: maxRetries,
+          schedule: Schedule.exponential(Duration.millis(100), 2),
+        }),
       );
 
       const lifecycleResult = sandboxResult.value;

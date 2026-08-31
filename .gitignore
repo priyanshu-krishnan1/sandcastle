@@ -3,3 +3,4 @@ dist
 .env.*
 .vercel
 .claude/settings.local.json.bob/
+.sandcastle
