@@ -1014,10 +1014,23 @@ The `bob()` factory accepts an optional second argument for provider-specific op
 agent: bob("default", { model: "custom-model" });
 ```
 
-| Option  | Type                     | Default | Description                                           |
-| ------- | ------------------------ | ------- | ----------------------------------------------------- |
-| `model` | `string`                 | —       | Bob-Shell model or configuration to use               |
-| `env`   | `Record<string, string>` | `{}`    | Environment variables injected by this agent provider |
+The factory's first argument (and the `model` option, which takes precedence when
+both are given) is rendered as `bob run`'s `--mode` flag, not `--model` — Bob 2.0's
+`run` command has no `--model` flag.
+
+| Option              | Type                      | Default | Description                                                                                                                     |
+| ------------------- | ------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `model`             | `string`                  | —       | Bob-Shell mode, rendered as `bob run --mode <value>`. Overrides the positional argument to `bob()` when both are set             |
+| `env`               | `Record<string, string>`  | `{}`    | Environment variables injected by this agent provider                                                                            |
+| `setupScript`       | `string`                  | —       | Shell snippet prepended before the install check (e.g. sourcing nvm or setting PATH on a remote host with no login profile)      |
+| `maxTurns`          | `number`                  | —       | Rendered as `bob run --max-turns <n>`, capping the number of agent turns per invocation                                          |
+| `maxCost`           | `number`                  | —       | Rendered as `bob run --max-cost <n>`, capping spend (in bobcoins) per invocation                                                 |
+| `disableToolGroups` | `string[]`                | —       | Rendered as `bob run --disable-tool-groups <a,b,...>`. Valid groups: `read`, `edit`, `execute`, `mcp`, `skill`, `todo`, `subagent`, `mode` |
+| `disableMcp`        | `boolean`                 | —       | Rendered as `bob run --disable-mcp`                                                                                              |
+| `disableSubagents`  | `boolean`                 | —       | Rendered as `bob run --disable-subagents`                                                                                        |
+| `workspace`         | `string`                  | —       | Rendered as `bob run --workspace <path>`                                                                                         |
+| `trust`             | `boolean`                 | `true`  | Rendered as `bob run --trust`. Defaults on so a headless run doesn't hang on an unanswered first-run trust prompt; pass `false` to restore the prompt |
+| `acceptLicense`     | `boolean`                 | `true`  | Rendered as `bob run --accept-license`. Defaults on for the same headless-hang reason as `trust`; pass `false` to restore the prompt |
 
 Both **agent providers** and **sandbox providers** accept an optional `env: Record<string, string>` in their options. These environment variables are merged with the `.sandcastle/.env` resolver output at launch time:
 

@@ -384,6 +384,32 @@ describe("InitService scaffold", () => {
       expect(mainTs).toContain("implement.commits.length");
     });
 
+    it("main.mts disables subagents for the reviewer stage but not the implementer", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+
+      const reviewerCallStart = mainTs.indexOf('name: "reviewer"');
+      const reviewerSection = mainTs.slice(
+        reviewerCallStart,
+        mainTs.indexOf("});", reviewerCallStart),
+      );
+      expect(reviewerSection).toContain("disableSubagents: true");
+
+      // The implementer keeps full capabilities — only the review stage's
+      // fan-out is redundant with Sandcastle's own per-iteration isolation.
+      const implementerCallStart = mainTs.indexOf('name: "implementer"');
+      const implementerSection = mainTs.slice(
+        implementerCallStart,
+        mainTs.indexOf("});", implementerCallStart),
+      );
+      expect(implementerSection).not.toContain("disableSubagents");
+    });
+
     it("implement-prompt.md contains issue selection and closure, not prompt argument placeholders", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "sequential-reviewer" });
@@ -1040,6 +1066,34 @@ describe("InitService scaffold", () => {
         mainTs.indexOf('name: "merger"') + 200,
       );
       expect(mergerSection).toContain("maxIterations: 1");
+    });
+
+    it("main.mts disables subagents for the reviewer stage but not the implementer", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "parallel-planner-with-review" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+
+      const reviewerCallStart = mainTs.indexOf('name: "reviewer"');
+      const reviewerSection = mainTs.slice(
+        reviewerCallStart,
+        mainTs.indexOf("});", reviewerCallStart),
+      );
+      expect(reviewerSection).toContain("disableSubagents: true");
+
+      // Each issue already runs in its own sandbox/branch concurrently via
+      // Promise.allSettled — nested subagent fan-out inside Bob for a
+      // single-branch review adds cost without benefit, so only the reviewer
+      // opts out. The implementer keeps full capabilities.
+      const implementerCallStart = mainTs.indexOf('name: "implementer"');
+      const implementerSection = mainTs.slice(
+        implementerCallStart,
+        mainTs.indexOf("});", implementerCallStart),
+      );
+      expect(implementerSection).not.toContain("disableSubagents");
     });
 
     it("implement-prompt.md contains {{TASK_ID}}, {{ISSUE_TITLE}}, {{BRANCH}} prompt arguments", async () => {

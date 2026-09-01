@@ -52,13 +52,15 @@ test("buildPrintCommand generates correct command", () => {
 });
 
 // Test 4: buildPrintCommand with model option
-test("buildPrintCommand includes model flag", () => {
+// Note: Bob 2.0's `bob run` has no `--model` flag — the `model` option is
+// rendered as `--mode` instead (see BobOptions doc comment in AgentProvider.ts).
+test("buildPrintCommand includes mode flag", () => {
   const agent = bob("default", { model: "custom-model" });
   const cmd = agent.buildPrintCommand({
     prompt: "Test",
     dangerouslySkipPermissions: false
   });
-  if (!cmd.command.includes("--model")) throw new Error("Should include --model flag");
+  if (!cmd.command.includes("--mode")) throw new Error("Should include --mode flag");
   if (!cmd.command.includes("custom-model")) throw new Error("Should include model name");
 });
 
@@ -74,13 +76,14 @@ test("buildInteractiveArgs generates correct args", () => {
 });
 
 // Test 6: buildInteractiveArgs with model
-test("buildInteractiveArgs includes model", () => {
+// Note: same --mode-not-model correction as the buildPrintCommand test above.
+test("buildInteractiveArgs includes mode", () => {
   const agent = bob("default", { model: "test-model" });
   const args = agent.buildInteractiveArgs({
     prompt: "Test",
     dangerouslySkipPermissions: false
   });
-  if (!args.includes("--model")) throw new Error("Should include --model flag");
+  if (!args.includes("--mode")) throw new Error("Should include --mode flag");
   if (!args.includes("test-model")) throw new Error("Should include model name");
 });
 
