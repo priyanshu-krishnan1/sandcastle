@@ -19,13 +19,21 @@ import { Display } from "./Display.js";
 import type {
   SandboxProvider,
   BranchStrategy,
-  BindMountSandboxProvider,
   SandboxHandle,
 } from "./SandboxProvider.js";
 import { runHostHooks, type SandboxHooks } from "./SandboxLifecycle.js";
 import { startSandbox } from "./startSandbox.js";
 import { syncOut } from "./syncOut.js";
 import { patchGitMountsForWindows } from "./mountUtils.js";
+
+/**
+ * Exhaustiveness check for a `switch` over a closed union — calling this in
+ * the `default` arm makes TypeScript flag any unhandled case at the call
+ * site (a compile error, not a silent fallthrough) if the union ever grows.
+ */
+const assertNever = (x: never): never => {
+  throw new Error(`Unhandled case: ${JSON.stringify(x)}`);
+};
 
 export interface ExecResult {
   readonly stdout: string;
@@ -387,71 +395,82 @@ export const startSandboxAgainstTarget = (
           )
         : Effect.succeed(undefined);
 
-    // No-sandbox providers: run directly on the host, no container or mounts.
-    if (sandboxProvider.tag === "none") {
-      yield* runCopyToWorktree();
-      yield* runOnWorktreeReady();
-      const { sandbox, worktreePath, handle } = yield* startSandbox({
-        provider: sandboxProvider,
-        hostRepoDir,
-        env,
-        worktreeOrRepoPath: targetPath,
-      });
-      return {
-        sandboxInfo: {
-          hostWorktreePath: targetPath,
-          sandboxRepoPath: worktreePath,
-        },
-        sandbox,
-        handle,
-      };
-    }
+    // Exhaustive dispatch on provider category — a switch with an
+    // `assertNever` default, not the previous if/if/fallthrough-with-cast,
+    // so a fourth `SandboxProvider` tag is a compile error at the default
+    // arm below instead of silently landing in the bind-mount branch.
+    switch (sandboxProvider.tag) {
+      // No-sandbox providers: run directly on the host, no container or mounts.
+      case "none": {
+        yield* runCopyToWorktree();
+        yield* runOnWorktreeReady();
+        const { sandbox, worktreePath, handle } = yield* startSandbox({
+          provider: sandboxProvider,
+          hostRepoDir,
+          env,
+          worktreeOrRepoPath: targetPath,
+        });
+        return {
+          sandboxInfo: {
+            hostWorktreePath: targetPath,
+            sandboxRepoPath: worktreePath,
+          },
+          sandbox,
+          handle,
+        };
+      }
 
-    // Isolated providers sync via git bundle. Note `copyPaths` is threaded
-    // into `startSandbox` here (not applied via `runCopyToWorktree`) —
-    // isolated providers copy the whole target into the sandbox via
-    // sync-in, so extra paths ride along with that same transfer rather
-    // than a separate host-side step.
-    if (sandboxProvider.tag === "isolated") {
-      yield* runOnWorktreeReady();
-      const { sandbox, worktreePath, handle } = yield* startSandbox({
-        provider: sandboxProvider,
-        hostRepoDir: targetPath,
-        env,
-        copyPaths,
-      });
-      return {
-        sandboxInfo: {
-          hostWorktreePath: targetPath,
-          sandboxRepoPath: worktreePath,
-          applyToHost: () => syncOut(targetPath, handle),
-        },
-        sandbox,
-        handle,
-      };
-    }
+      // Isolated providers sync via git bundle. Note `copyPaths` is threaded
+      // into `startSandbox` here (not applied via `runCopyToWorktree`) —
+      // isolated providers copy the whole target into the sandbox via
+      // sync-in, so extra paths ride along with that same transfer rather
+      // than a separate host-side step.
+      case "isolated": {
+        yield* runOnWorktreeReady();
+        const { sandbox, worktreePath, handle } = yield* startSandbox({
+          provider: sandboxProvider,
+          hostRepoDir: targetPath,
+          env,
+          copyPaths,
+        });
+        return {
+          sandboxInfo: {
+            hostWorktreePath: targetPath,
+            sandboxRepoPath: worktreePath,
+            applyToHost: () => syncOut(targetPath, handle),
+          },
+          sandbox,
+          handle,
+        };
+      }
 
-    // Bind-mount provider.
-    yield* runCopyToWorktree();
-    yield* runOnWorktreeReady();
-    const gitMounts = yield* resolveAndPatchGitMounts();
-    const { sandbox, worktreePath, handle } = yield* startSandbox({
-      provider: sandboxProvider as BindMountSandboxProvider,
-      hostRepoDir,
-      env,
-      worktreeOrRepoPath: targetPath,
-      gitMounts,
-      repoDir: SANDBOX_REPO_DIR,
-    });
-    return {
-      sandboxInfo: {
-        hostWorktreePath: targetPath,
-        sandboxRepoPath: worktreePath,
-        bindMountHandle: handle,
-      },
-      sandbox,
-      handle,
-    };
+      // Bind-mount provider.
+      case "bind-mount": {
+        yield* runCopyToWorktree();
+        yield* runOnWorktreeReady();
+        const gitMounts = yield* resolveAndPatchGitMounts();
+        const { sandbox, worktreePath, handle } = yield* startSandbox({
+          provider: sandboxProvider,
+          hostRepoDir,
+          env,
+          worktreeOrRepoPath: targetPath,
+          gitMounts,
+          repoDir: SANDBOX_REPO_DIR,
+        });
+        return {
+          sandboxInfo: {
+            hostWorktreePath: targetPath,
+            sandboxRepoPath: worktreePath,
+            bindMountHandle: handle,
+          },
+          sandbox,
+          handle,
+        };
+      }
+
+      default:
+        return assertNever(sandboxProvider);
+    }
   });
 
 /**

@@ -1,36 +1,42 @@
 /**
- * `SandcastleLifecycle` — a pluggable, phase-based alternative to
- * `withSandboxLifecycle` (./SandboxLifecycle.js) for workflows that don't fit
- * "repo lives on the local host filesystem": `noGitLifecycle` (no git at
- * all — artifact-based work) and `remoteOnlyLifecycle` (repo lives on a
- * remote host reached over SSH, commits stay there).
+ * `SandcastleLifecycle` — a pluggable, phase-based engine for workflows that
+ * don't fit "repo lives on the local host filesystem, needs a worktree":
+ * `noGitLifecycle` (no git at all — artifact-based work) and
+ * `remoteOnlyLifecycle` (repo lives on a remote host reached over SSH,
+ * commits stay there).
  *
- * `withSandboxLifecycle` itself is unchanged and remains the local preset —
- * it already does everything a `localGitLifecycle` would (worktree, hooks,
- * merge/cherry-pick, commit collection), so it isn't reshaped into this
- * interface. Nothing in this codebase constructs a `SandcastleLifecycle` yet;
- * this is the seam a future caller-side preset selector would use.
+ * This is deliberately NOT a general replacement for `withSandboxLifecycle`
+ * (./SandboxLifecycle.js), and the two are not "duplicate implementations of
+ * the same lifecycle" at risk of drifting apart — `withSandboxLifecycle`
+ * does real work neither preset here needs: worktree creation, bind-mount
+ * vs. isolated-provider sync, host git-identity propagation, and
+ * merge/cherry-pick onto the host branch. Forcing both onto one shared
+ * 4-phase shape would mean adding parameters and moving logic across phase
+ * boundaries in `withSandboxLifecycle` purely to satisfy a preset that
+ * doesn't need them — that's not attempted here. These are purpose-built
+ * engines for cases `withSandboxLifecycle` structurally doesn't cover, and
+ * nothing in this codebase constructs a `SandcastleLifecycle` yet; this is
+ * the seam a future caller-side preset selector would use.
  *
- * Sandbox hooks here run sequentially with no cooperative abort support —
- * unlike `withSandboxLifecycleImpl`'s hook runner, which races hooks against
- * an `AbortSignal` via `Deferred` because `SandboxHandle.exec` has no native
- * cancellation. That complexity isn't duplicated here; it's a known gap for
- * these two new presets, not an oversight.
+ * The one piece of real logic these two engines *do* share with
+ * `withSandboxLifecycleImpl` is sandbox-hook cancellation, so it isn't
+ * reimplemented here — `runSandboxHooks` below delegates to
+ * `runSandboxHooksWithAbort` (./SandboxLifecycle.js), the exact
+ * `AbortSignal`-via-`Deferred` mechanism the real lifecycle uses, so a
+ * `signal` passed into `noGitLifecycle`/`remoteOnlyLifecycle` behaves
+ * identically to one passed into `withSandboxLifecycle`.
  */
 import { Effect, Layer } from "effect";
 import { Display } from "./Display.js";
-import { execOk } from "./SandboxLifecycle.js";
+import { runSandboxHooksWithAbort } from "./SandboxLifecycle.js";
 import { type SandboxService } from "./SandboxFactory.js";
 import { GitClient, gitClientLayerFor } from "./GitClient.js";
 import type { RepoRef } from "./RepoRef.js";
 import {
-  ExecError,
-  HookTimeoutError,
-  withTimeout,
+  type ExecError,
+  type HookTimeoutError,
   type SandboxError,
 } from "./errors.js";
-
-const HOOK_TIMEOUT_MS = 60_000;
 
 export interface LifecycleContext {
   readonly sandbox: SandboxService;
@@ -70,35 +76,18 @@ export type SandboxHookSpec = {
 };
 
 /**
- * Runs `hooks` sequentially in the sandbox, failing fast on the first
- * non-zero exit or per-hook timeout. See the file header for why this is
- * sequential/non-cancellable, unlike `withSandboxLifecycleImpl`'s hook
- * runner.
+ * Runs `hooks` in the sandbox via `runSandboxHooksWithAbort` — the same
+ * `AbortSignal`-via-`Deferred` cancellation `withSandboxLifecycleImpl` uses,
+ * shared rather than reimplemented. `signal` defaults to a never-aborted one
+ * so callers that don't need cancellation can omit it.
  */
 export const runSandboxHooks = (
   sandbox: SandboxService,
   sandboxRepoDir: string,
   hooks: ReadonlyArray<SandboxHookSpec>,
+  signal: AbortSignal = new AbortController().signal,
 ): Effect.Effect<void, ExecError | HookTimeoutError> =>
-  Effect.gen(function* () {
-    for (const hook of hooks) {
-      const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
-      yield* execOk(sandbox, hook.command, {
-        cwd: sandboxRepoDir,
-        sudo: hook.sudo,
-      }).pipe(
-        withTimeout(
-          timeout,
-          () =>
-            new HookTimeoutError({
-              message: `Hook '${hook.command}' timed out after ${timeout}ms`,
-              timeoutMs: timeout,
-              command: hook.command,
-            }),
-        ),
-      );
-    }
-  });
+  runSandboxHooksWithAbort(sandbox, sandboxRepoDir, hooks, signal);
 
 /**
  * Sequences a `SandcastleLifecycle`'s phases around `work`:
@@ -125,14 +114,21 @@ export const runLifecycle = <A>(
 /**
  * No git at all — artifact-based work. `beforeWork` runs `config.hooks` (if
  * any); everything else is the interface's default (no branch, no commits —
- * there's no git to report on).
+ * there's no git to report on). `config.signal`, when passed, lets hooks
+ * cancel cooperatively via `runSandboxHooks`'s abort racing.
  */
 export const noGitLifecycle = (config?: {
   readonly hooks?: ReadonlyArray<SandboxHookSpec>;
+  readonly signal?: AbortSignal;
 }): SandcastleLifecycle => ({
   beforeWork: (ctx) =>
     config?.hooks?.length
-      ? runSandboxHooks(ctx.sandbox, ctx.sandboxRepoDir, config.hooks)
+      ? runSandboxHooks(
+          ctx.sandbox,
+          ctx.sandboxRepoDir,
+          config.hooks,
+          config.signal,
+        )
       : Effect.void,
 });
 
@@ -151,6 +147,8 @@ export const remoteOnlyLifecycle = (config: {
   readonly branch: string;
   readonly hooks?: ReadonlyArray<SandboxHookSpec>;
   readonly gitClientLayer?: Layer.Layer<GitClient>;
+  /** Lets hooks cancel cooperatively via `runSandboxHooks`'s abort racing. */
+  readonly signal?: AbortSignal;
 }): SandcastleLifecycle => {
   const gitClientLayer =
     config.gitClientLayer ?? gitClientLayerFor(config.repoRef);
@@ -165,7 +163,12 @@ export const remoteOnlyLifecycle = (config: {
 
     beforeWork: (ctx) =>
       config.hooks?.length
-        ? runSandboxHooks(ctx.sandbox, ctx.sandboxRepoDir, config.hooks)
+        ? runSandboxHooks(
+            ctx.sandbox,
+            ctx.sandboxRepoDir,
+            config.hooks,
+            config.signal,
+          )
         : Effect.void,
 
     teardown: () =>

@@ -82,6 +82,25 @@ describe("noGitLifecycle", () => {
 
     expect(outcome).toEqual({ result: "ok", branch: "", commits: [] });
   });
+
+  it("cancels a running hook when signal fires", async () => {
+    const ctx = await makeCtx();
+    const ac = new AbortController();
+
+    const promise = Effect.runPromise(
+      runLifecycle(
+        noGitLifecycle({
+          hooks: [{ command: "sleep 60" }],
+          signal: ac.signal,
+        }),
+        ctx,
+        () => Effect.succeed("unreached"),
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    setTimeout(() => ac.abort("cancelled"), 50);
+    await expect(promise).rejects.toThrow();
+  });
 });
 
 describe("remoteOnlyLifecycle", () => {
@@ -142,5 +161,36 @@ describe("remoteOnlyLifecycle", () => {
     expect(() =>
       remoteOnlyLifecycle({ repoRef, branch: "main" }),
     ).not.toThrow();
+  });
+
+  it("cancels a running hook when signal fires", async () => {
+    const ctx = await makeCtx();
+    const ac = new AbortController();
+    const fakeGitClient: GitClientService = {
+      currentBranch: () => Effect.succeed("unused"),
+      identity: () => Effect.succeed({ name: "", email: "" }),
+      revParseHead: () => Effect.succeed("abc123"),
+      hasCommitsInRange: () => Effect.succeed(true),
+      revList: () => Effect.succeed([]),
+      mergeBranch: () => Effect.void,
+      deleteBranch: () => Effect.void,
+    };
+
+    const promise = Effect.runPromise(
+      runLifecycle(
+        remoteOnlyLifecycle({
+          repoRef,
+          branch: "main",
+          hooks: [{ command: "sleep 60" }],
+          gitClientLayer: Layer.succeed(GitClient, fakeGitClient),
+          signal: ac.signal,
+        }),
+        ctx,
+        () => Effect.succeed("unreached"),
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    setTimeout(() => ac.abort("cancelled"), 50);
+    await expect(promise).rejects.toThrow();
   });
 });

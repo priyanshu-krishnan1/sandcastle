@@ -141,6 +141,85 @@ export const runHostHooks = (
     }
   });
 
+/**
+ * Runs `hooks` inside the sandbox with unbounded concurrency, racing each one
+ * against `signal` via a `Deferred` — `sandbox.exec` has no native
+ * cancellation, so this is the bridge from a Node `AbortSignal` (which
+ * Effect's own fiber interruption doesn't observe) into Effect's world.
+ * Cancels the *wait*, not the underlying child process. Extracted out of
+ * `withSandboxLifecycleImpl` so `SandcastleLifecycle.ts`'s presets
+ * (`noGitLifecycle`, `remoteOnlyLifecycle`) get the exact same, proven
+ * cancellation behavior instead of a second, lesser implementation.
+ */
+export const runSandboxHooksWithAbort = (
+  sandbox: SandboxService,
+  sandboxRepoDir: string,
+  hooks: ReadonlyArray<{
+    readonly command: string;
+    readonly sudo?: boolean;
+    readonly timeoutMs?: number;
+  }>,
+  signal: AbortSignal,
+): Effect.Effect<void, ExecError | HookTimeoutError> =>
+  Effect.gen(function* () {
+    const abortDeferred = yield* Deferred.make<never, ExecError>();
+    let abortCleanup: (() => void) | null = null;
+    if (signal.aborted) {
+      yield* Deferred.fail(
+        abortDeferred,
+        new ExecError({
+          command: "abort",
+          message: `Aborted: ${signal.reason}`,
+        }),
+      );
+    } else {
+      const onAbort = () => {
+        Effect.runPromise(
+          Deferred.fail(
+            abortDeferred,
+            new ExecError({
+              command: "abort",
+              message: `Aborted: ${signal.reason}`,
+            }),
+          ),
+        ).catch(() => {});
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      abortCleanup = () => signal.removeEventListener("abort", onAbort);
+    }
+
+    const hookEffects = hooks.map((hook) => {
+      const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
+      return Effect.raceFirst(
+        execOk(sandbox, hook.command, {
+          cwd: sandboxRepoDir,
+          sudo: hook.sudo,
+        }).pipe(
+          withTimeout(
+            timeout,
+            () =>
+              new HookTimeoutError({
+                message: `Hook '${hook.command}' timed out after ${timeout}ms`,
+                timeoutMs: timeout,
+                command: hook.command,
+              }),
+          ),
+        ),
+        Deferred.await(abortDeferred) as Effect.Effect<
+          never,
+          ExecError,
+          never
+        >,
+      );
+    });
+
+    yield* (
+      hookEffects.length > 0
+        ? Effect.all(hookEffects, { concurrency: "unbounded" })
+        : Effect.void
+    ).pipe(Effect.ensuring(Effect.sync(() => abortCleanup?.())));
+  });
+
 export interface SandboxLifecycleOptions {
   readonly hostRepoDir: string;
   readonly sandboxRepoDir: string;
@@ -278,59 +357,6 @@ export const withSandboxLifecycleImpl = <A>(
           }
         }
 
-        // Set up abort racing for sandbox hooks (sandbox.exec doesn't
-        // natively support AbortSignal, so we race via Deferred).
-        const abortDeferred = yield* Deferred.make<never, ExecError>();
-        let abortCleanup: (() => void) | null = null;
-        if (signal.aborted) {
-          yield* Deferred.fail(
-            abortDeferred,
-            new ExecError({
-              command: "abort",
-              message: `Aborted: ${signal.reason}`,
-            }),
-          );
-        } else {
-          const onAbort = () => {
-            Effect.runPromise(
-              Deferred.fail(
-                abortDeferred,
-                new ExecError({
-                  command: "abort",
-                  message: `Aborted: ${signal.reason}`,
-                }),
-              ),
-            ).catch(() => {});
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-          abortCleanup = () => signal.removeEventListener("abort", onAbort);
-        }
-
-        const sandboxHookEffects = (sandboxHooks ?? []).map((hook) => {
-          const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
-          return Effect.raceFirst(
-            execOk(sandbox, hook.command, {
-              cwd: sandboxRepoDir,
-              sudo: hook.sudo,
-            }).pipe(
-              withTimeout(
-                timeout,
-                () =>
-                  new HookTimeoutError({
-                    message: `Hook '${hook.command}' timed out after ${timeout}ms`,
-                    timeoutMs: timeout,
-                    command: hook.command,
-                  }),
-              ),
-            ),
-            Deferred.await(abortDeferred) as Effect.Effect<
-              never,
-              ExecError,
-              never
-            >,
-          );
-        });
-
         const hostHookEffects = (hostOnSandboxReady ?? []).map((hook) => {
           const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
           return Effect.tryPromise({
@@ -357,12 +383,18 @@ export const withSandboxLifecycleImpl = <A>(
           );
         });
 
-        const allOnSandboxReady = [...sandboxHookEffects, ...hostHookEffects];
-        yield* (
-          allOnSandboxReady.length > 0
-            ? Effect.all(allOnSandboxReady, { concurrency: "unbounded" })
-            : Effect.void
-        ).pipe(Effect.ensuring(Effect.sync(() => abortCleanup?.())));
+        yield* Effect.all(
+          [
+            runSandboxHooksWithAbort(
+              sandbox,
+              sandboxRepoDir,
+              sandboxHooks ?? [],
+              signal,
+            ),
+            ...hostHookEffects,
+          ],
+          { concurrency: "unbounded" },
+        );
       }),
     );
 
