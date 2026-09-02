@@ -27,6 +27,7 @@ import { basename, dirname, join } from "node:path";
 import { Effect } from "effect";
 import type { ExecResult, SandboxService } from "./SandboxFactory.js";
 import type { SandboxHandle } from "./SandboxProvider.js";
+import { requireTransfer } from "./SandboxProvider.js";
 import { buildRecoveryMessage, type FailedStep } from "./RecoveryMessage.js";
 import { SyncError } from "./errors.js";
 
@@ -307,10 +308,11 @@ export const syncOut = (
           const sandboxPatchPath = `${sandboxPatchDir}/${patchName}`;
           const hostPatchPath = join(patchDir, patchName);
           yield* Effect.tryPromise({
-            // `transfer` is guaranteed present — syncOut is only ever called
-            // with an isolated provider's handle.
             try: () =>
-              handle.transfer!.copyFileOut(sandboxPatchPath, hostPatchPath),
+              requireTransfer(handle, "syncOut").copyFileOut(
+                sandboxPatchPath,
+                hostPatchPath,
+              ),
             catch: (e) =>
               new SyncError({
                 message: `Failed to copy patch ${patchName}: ${e instanceof Error ? e.message : String(e)}`,
@@ -347,8 +349,10 @@ export const syncOut = (
         yield* Effect.tryPromise({
           try: async () => {
             await mkdir(dirname(hostFilePath), { recursive: true });
-            // `transfer` is guaranteed present — see the comment above.
-            await handle.transfer!.copyFileOut(sandboxFilePath, hostFilePath);
+            await requireTransfer(handle, "syncOut").copyFileOut(
+              sandboxFilePath,
+              hostFilePath,
+            );
           },
           catch: (e) =>
             new SyncError({

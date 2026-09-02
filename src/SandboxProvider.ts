@@ -138,6 +138,32 @@ export interface IsolatedSandboxProviderConfig {
   readonly create: (options: IsolatedCreateOptions) => Promise<SandboxHandle>;
 }
 
+/**
+ * Reads `handle.transfer`, throwing a descriptive error instead of the bare
+ * `undefined.copyIn is not a function` a plain `handle.transfer!.copyIn(...)`
+ * would produce. `transfer` is optional on `SandboxHandle` because
+ * bind-mount/no-sandbox providers never implement it, but callers that reach
+ * for it (`syncOut.ts`, `copyPaths` handling in `startSandbox.ts`) only ever
+ * do so against an isolated provider's handle — a call-site invariant the
+ * type system can't check since `SandboxHandle` is one unified interface.
+ * This turns a violation of that invariant (e.g. a custom provider tagged
+ * `"isolated"` that forgot to implement `transfer`) into a clear diagnostic
+ * naming the caller, instead of a confusing crash deep inside `transfer`.
+ */
+export const requireTransfer = (
+  handle: SandboxHandle,
+  context: string,
+): SandboxTransfer => {
+  if (!handle.transfer) {
+    throw new Error(
+      `${context}: sandbox handle has no \`transfer\` implementation. ` +
+        `Isolated providers must implement \`transfer.copyIn\`/\`copyFileOut\` ` +
+        `in their \`create\` function — see IsolatedSandboxProviderConfig.create.`,
+    );
+  }
+  return handle.transfer;
+};
+
 /** A bind-mount sandbox provider. */
 export interface BindMountSandboxProvider {
   /** @internal Discriminator for internal dispatch. */

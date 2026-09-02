@@ -17,6 +17,7 @@ import type {
   NoSandboxProvider,
   SandboxHandle,
 } from "./SandboxProvider.js";
+import { requireTransfer } from "./SandboxProvider.js";
 import {
   type SandboxService,
   type MountEntry,
@@ -225,9 +226,11 @@ const startIsolatedSandbox = (
           // regardless of host platform.
           const sandboxPath = posix.join(handle.worktreePath, relativePath);
           yield* Effect.tryPromise({
-            // `transfer` is guaranteed present here — this branch only runs
-            // for isolated providers, which must implement it.
-            try: () => handle.transfer!.copyIn(hostPath, sandboxPath),
+            try: () =>
+              requireTransfer(handle, "copyPaths").copyIn(
+                hostPath,
+                sandboxPath,
+              ),
             catch: (e) =>
               new WorktreeError({
                 message: `Failed to copy ${relativePath} into sandbox: ${e instanceof Error ? e.message : String(e)}`,

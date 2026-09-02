@@ -773,6 +773,16 @@ export const createSandboxFromWorktree = async (
 
     const provider = options.sandbox;
 
+    // This hand-rolls the same provider-tag branching that SandboxFactory.ts's
+    // acquireSandbox/startSandboxAgainstTarget now does once, shared by
+    // interactive.ts and createWorktree.ts. It's not deduplicated here
+    // because createSandboxFromWorktree returns a long-lived Sandbox handle
+    // that outlives a single scoped callback and can be run multiple times —
+    // acquireSandbox/releaseSandbox are currently scoped to one
+    // Effect.acquireUseRelease callback and don't support that shape.
+    // Migrating this file onto the shared primitives needs that gap closed
+    // first (a reusable-handle variant of acquireSandbox), not just a
+    // call-site change.
     let startEffect;
     if (provider.tag === "isolated") {
       startEffect = startSandbox({
@@ -966,6 +976,10 @@ export const createSandbox = async (
             });
 
             const provider = options.sandbox;
+            // Same hand-rolled provider-tag branching as createSandboxFromWorktree
+            // above, and not yet migrated onto SandboxFactory.ts's shared
+            // acquireSandbox/startSandboxAgainstTarget for the same reason — see
+            // the comment there.
             const startResult = yield* provider.tag === "isolated"
               ? startSandbox({
                   provider,
