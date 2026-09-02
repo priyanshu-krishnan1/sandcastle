@@ -147,9 +147,10 @@ export const runHostHooks = (
  * cancellation, so this is the bridge from a Node `AbortSignal` (which
  * Effect's own fiber interruption doesn't observe) into Effect's world.
  * Cancels the *wait*, not the underlying child process. Extracted out of
- * `withSandboxLifecycleImpl` so `SandcastleLifecycle.ts`'s presets
- * (`noGitLifecycle`, `remoteOnlyLifecycle`) get the exact same, proven
- * cancellation behavior instead of a second, lesser implementation.
+ * `withSandboxLifecycleImpl`'s inline block as its own export so any future
+ * lighter-weight lifecycle variant (one that doesn't need a full worktree)
+ * can reuse this exact, proven cancellation behavior instead of a second,
+ * lesser implementation.
  */
 export const runSandboxHooksWithAbort = (
   sandbox: SandboxService,

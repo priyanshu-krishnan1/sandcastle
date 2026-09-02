@@ -3,19 +3,20 @@
  * operation (identity, current branch, merge, commit collection). Previously
  * these were hardcoded `node:child_process.exec` calls against the local
  * filesystem, baked directly into orchestration-level code with no injectable
- * abstraction — the reason a remote target (a target whose git repo lives on
- * a machine reached only over SSH, not the host running Sandcastle) could
- * never get the same merge/commit-collection safety net a local worktree
- * gets.
+ * abstraction.
  *
  * `makeGitClient` is generic over how a command actually runs — it only
  * needs a function that executes `git ...` in some `cwd` and resolves with
  * stdout (rejecting on non-zero exit, matching `child_process.exec`'s own
  * contract). `LocalGitClient` below is `makeGitClient` fed the real local
  * `child_process.exec`, and reproduces the exact commands/behavior this
- * replaced. A remote implementation is the same factory fed a function that
- * runs the command over SSH instead — no new GitClientService methods, no
- * changes to SandboxLifecycle.ts, just a different `exec` argument.
+ * replaced, and is the only `GitClient` implementation Sandcastle ships
+ * today. The `GitExec` seam exists so a non-local implementation (e.g. a
+ * target whose repo lives on a machine reached only over SSH) can be added
+ * later as a second `gitExec` argument, with no changes to
+ * `GitClientService` or `SandboxLifecycle.ts` — but that's a forward-looking
+ * note, not a shipped capability; build it against a real caller's needs
+ * when one exists, rather than guessing at the shape now.
  *
  * Per-operation failure semantics are preserved exactly from what
  * `SandboxLifecycle.ts` did before this extraction, not homogenized:
@@ -29,8 +30,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { Context, Effect, Layer } from "effect";
-import type { RepoRef } from "./RepoRef.js";
-import { shellQuote } from "./shellQuote.js";
 
 export interface GitIdentity {
   readonly name: string;
@@ -168,77 +167,8 @@ export const makeGitClient = (gitExec: GitExec): GitClientService => ({
 
 const execAsync = promisify(exec);
 
-/** `makeGitClient` fed the real local `child_process.exec` — the only `GitClient` implementation in use today. */
+/** `makeGitClient` fed the real local `child_process.exec` — the only `GitClient` implementation Sandcastle ships today. */
 export const LocalGitClient: Layer.Layer<GitClient> = Layer.succeed(
   GitClient,
   makeGitClient((command, cwd) => execAsync(command, { cwd })),
 );
-
-/** SSH connection details for `makeRemoteGitExec` — the `remote` fields of `RepoRef`, minus `kind`/`path` (cwd is passed per-call by `GitExec`, not fixed to the target). */
-export type RemoteGitTarget = Omit<
-  Extract<RepoRef, { kind: "remote" }>,
-  "kind" | "path"
->;
-
-const buildSshArgs = (target: RemoteGitTarget): string[] => {
-  const args = ["-o", "BatchMode=yes"];
-  if (target.identityFile) {
-    args.push("-i", target.identityFile);
-  }
-  if (target.sshArgs) {
-    args.push(...target.sshArgs);
-  }
-  args.push(target.user ? `${target.user}@${target.host}` : target.host);
-  return args;
-};
-
-/**
- * Builds a `GitExec` that runs each command over SSH against `target`,
- * rather than locally. `cwd` becomes a remote path, reached via `cd` on the
- * far side. `sshExecAsync` defaults to the real `promisify(exec)` (matching
- * `LocalGitClient`'s own execution style — one assembled command string, no
- * streaming needed for short git output) but is injectable so tests never
- * spawn real `ssh`.
- */
-export const makeRemoteGitExec = (
-  target: RemoteGitTarget,
-  sshExecAsync: (command: string) => Promise<{ stdout: string }> = (command) =>
-    execAsync(command),
-): GitExec => {
-  const sshArgs = buildSshArgs(target);
-  return (command, cwd) => {
-    const remoteCommand = `cd ${shellQuote(cwd)} && ${command}`;
-    const fullCommand = `ssh ${sshArgs.map(shellQuote).join(" ")} ${shellQuote(remoteCommand)}`;
-    return sshExecAsync(fullCommand);
-  };
-};
-
-/** `makeGitClient` fed an SSH-backed `GitExec` against `target` — a `GitClient` for a repo that lives on a remote host. */
-export const RemoteGitClient = (
-  target: RemoteGitTarget,
-): Layer.Layer<GitClient> =>
-  Layer.succeed(GitClient, makeGitClient(makeRemoteGitExec(target)));
-
-/**
- * Picks the `GitClient` implementation for a `RepoRef`. `kind: "none"`
- * throws synchronously — there is no repo to run git against, so no current
- * or planned caller should be requesting a `GitClient` for one; a future
- * no-git lifecycle preset simply won't request `GitClient` at all.
- */
-export const gitClientLayerFor = (ref: RepoRef): Layer.Layer<GitClient> => {
-  switch (ref.kind) {
-    case "local":
-      return LocalGitClient;
-    case "remote":
-      return RemoteGitClient({
-        host: ref.host,
-        user: ref.user,
-        identityFile: ref.identityFile,
-        sshArgs: ref.sshArgs,
-      });
-    case "none":
-      throw new Error(
-        'gitClientLayerFor: RepoRef has kind "none" — there is no repo to build a GitClient for.',
-      );
-  }
-};

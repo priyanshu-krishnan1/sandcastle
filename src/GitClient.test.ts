@@ -4,14 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { Effect } from "effect";
-import { describe, expect, it, vi } from "vitest";
-import {
-  GitClient,
-  gitClientLayerFor,
-  makeGitClient,
-  makeRemoteGitExec,
-  type GitExec,
-} from "./GitClient.js";
+import { describe, expect, it } from "vitest";
+import { makeGitClient, type GitExec } from "./GitClient.js";
 
 const execAsync = promisify(exec);
 
@@ -173,81 +167,5 @@ describe.each([
 
     // Clean up the half-finished merge so the temp dir doesn't linger dirty.
     await execAsync("git merge --abort", { cwd: dir }).catch(() => {});
-  });
-});
-
-describe("makeRemoteGitExec", () => {
-  it("assembles the ssh command from host/user/identityFile/sshArgs, cd's into cwd, and returns stdout", async () => {
-    const sshExecAsync = vi.fn().mockResolvedValue({ stdout: "main\n" });
-    const gitExec = makeRemoteGitExec(
-      {
-        host: "fyre-x86",
-        user: "agent",
-        identityFile: "/keys/id_rsa",
-        sshArgs: ["-p", "2222"],
-      },
-      sshExecAsync,
-    );
-
-    const result = await gitExec(
-      "git rev-parse --abbrev-ref HEAD",
-      "/home/agent/repo",
-    );
-
-    expect(result).toEqual({ stdout: "main\n" });
-    const [command] = sshExecAsync.mock.calls[0] as [string];
-    expect(command).toBe(
-      "ssh '-o' 'BatchMode=yes' '-i' '/keys/id_rsa' '-p' '2222' 'agent@fyre-x86' " +
-        "'cd '\\''/home/agent/repo'\\'' && git rev-parse --abbrev-ref HEAD'",
-    );
-  });
-
-  it("omits the user@ prefix when no user is given", async () => {
-    const sshExecAsync = vi.fn().mockResolvedValue({ stdout: "" });
-    const gitExec = makeRemoteGitExec({ host: "fyre-x86" }, sshExecAsync);
-
-    await gitExec("git rev-parse HEAD", "/repo");
-
-    const [command] = sshExecAsync.mock.calls[0] as [string];
-    expect(command).toContain("'fyre-x86'");
-    expect(command).not.toContain("@fyre-x86");
-  });
-
-  it("propagates a rejection from the injected exec channel", async () => {
-    const sshExecAsync = vi
-      .fn()
-      .mockRejectedValue(new Error("ssh: connection refused"));
-    const gitExec = makeRemoteGitExec({ host: "fyre-x86" }, sshExecAsync);
-
-    await expect(gitExec("git rev-parse HEAD", "/repo")).rejects.toThrow(
-      "ssh: connection refused",
-    );
-  });
-});
-
-describe("gitClientLayerFor", () => {
-  it("dispatches 'local' to a working GitClient against a real repo", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "gitclient-test-"));
-    await initRepo(dir);
-    await commitFile(dir, "a.txt", "a", "initial");
-
-    const branch = await Effect.runPromise(
-      Effect.gen(function* () {
-        const client = yield* GitClient;
-        return yield* client.currentBranch(dir);
-      }).pipe(Effect.provide(gitClientLayerFor({ kind: "local", path: dir }))),
-    );
-
-    expect(branch).toBe("main");
-  });
-
-  it("dispatches 'remote' to a RemoteGitClient layer without throwing", () => {
-    expect(() =>
-      gitClientLayerFor({ kind: "remote", host: "fyre-x86", path: "/repo" }),
-    ).not.toThrow();
-  });
-
-  it("throws for kind 'none' — there is no repo to build a GitClient for", () => {
-    expect(() => gitClientLayerFor({ kind: "none" })).toThrow(/kind "none"/);
   });
 });
