@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import { Deferred, Duration, Effect, Schedule } from "effect";
+import { Deferred, Duration, Effect, Layer, Schedule } from "effect";
 import { Display } from "./Display.js";
 import {
   CommitCollectionTimeoutError,
@@ -12,7 +12,7 @@ import {
   withTimeout,
   type SandboxError,
 } from "./errors.js";
-import { GitClient, LocalGitClient } from "./GitClient.js";
+import { GitClient, LocalGitClient, makeGitClient } from "./GitClient.js";
 import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
 import type { Timeouts } from "./run.js";
 import { countCommitsToSync } from "./syncOut.js";
@@ -242,6 +242,16 @@ export interface SandboxLifecycleOptions {
    *  detach-and-delete of the source branch so the worktree handle stays usable for
    *  subsequent `wt.run()` / `wt.interactive()` calls. */
   readonly keepSourceBranch?: boolean;
+  /**
+   * Mirrors `NoSandboxProvider.nativeGitTarget` — set when `hostRepoDir`
+   * isn't actually where the agent's repo lives (e.g. a remote-native
+   * provider like `fyreNative()`). `withSandboxLifecycle` uses this to
+   * route every git operation through `sandbox`'s own `exec` (targeting
+   * `sandboxRepoDir`) instead of `LocalGitClient` against `hostRepoDir` —
+   * otherwise branch-strategy/merge/diff-collection would silently run
+   * against the wrong repository.
+   */
+  readonly nativeGitTarget?: boolean;
 }
 
 export interface SandboxContext {
@@ -531,11 +541,58 @@ export const withSandboxLifecycleImpl = <A>(
  * default and, today, only `GitClient` implementation. Behavior is identical
  * to before this seam existed; every existing caller needs no changes.
  */
+/**
+ * Builds a `GitClient` layer from `sandbox`'s own `exec` rather than the
+ * local host's `child_process.exec` — used in place of `LocalGitClient` when
+ * `nativeGitTarget` is set, so a provider like `fyreNative()` (repo lives on
+ * a remote machine, reached only through the handle) gets git operations run
+ * where the repo actually is, using the SSH channel the provider already
+ * established, instead of a second independent one.
+ *
+ * Adapts `SandboxService.exec`'s `Effect`/`exitCode` contract to `GitExec`'s
+ * `Promise`/reject-on-nonzero-exit one (matching `child_process.exec`, per
+ * `GitClient.ts`'s own `GitExec` contract).
+ */
+const gitClientFromSandbox = (
+  sandbox: SandboxService,
+): Layer.Layer<GitClient> =>
+  Layer.succeed(
+    GitClient,
+    makeGitClient((command, cwd) =>
+      Effect.runPromise(sandbox.exec(command, { cwd })).then((result) => {
+        if (result.exitCode !== 0) {
+          throw new Error(
+            result.stderr.trim() ||
+              `git command failed (exit ${result.exitCode}): ${command}`,
+          );
+        }
+        return { stdout: result.stdout };
+      }),
+    ),
+  );
+
 export const withSandboxLifecycle = <A>(
   options: SandboxLifecycleOptions,
   sandbox: SandboxService,
   work: (ctx: SandboxContext) => Effect.Effect<A, SandboxError, Display>,
-): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> =>
-  withSandboxLifecycleImpl(options, sandbox, work).pipe(
+): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> => {
+  if (options.nativeGitTarget) {
+    // hostRepoDir has no relationship to where this provider's repo lives —
+    // sandboxRepoDir is the real location, reached via sandbox.exec. Every
+    // place withSandboxLifecycleImpl would otherwise treat hostRepoDir (or
+    // its hostWorktreePath fallback) as the repo needs to see that same
+    // location instead.
+    return withSandboxLifecycleImpl(
+      {
+        ...options,
+        hostRepoDir: options.sandboxRepoDir,
+        hostWorktreePath: undefined,
+      },
+      sandbox,
+      work,
+    ).pipe(Effect.provide(gitClientFromSandbox(sandbox)));
+  }
+  return withSandboxLifecycleImpl(options, sandbox, work).pipe(
     Effect.provide(LocalGitClient),
   );
+};

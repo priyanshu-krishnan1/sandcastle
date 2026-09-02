@@ -272,6 +272,7 @@ export const interactive = async (
               branch: lifecycleBranch,
               hostWorktreePath: sandboxInfo.hostWorktreePath,
               applyToHost: sandboxInfo.applyToHost ?? (() => Effect.void),
+              nativeGitTarget: sandboxInfo.nativeGitTarget,
               timeouts: options.timeouts,
             },
             sandbox,

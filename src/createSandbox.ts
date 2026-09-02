@@ -280,6 +280,9 @@ interface SandboxHandleContext {
   readonly bindMountHandle: SandboxHandle | undefined;
   /** Provider tag, used by resumeSession to dispatch the host-side session lookup. */
   readonly providerTag: SandboxProvider["tag"];
+  /** See SandboxLifecycle.ts's nativeGitTarget — set when this provider's
+   *  repo isn't reachable via hostRepoDir (e.g. fyreNative()). */
+  readonly nativeGitTarget?: boolean;
   readonly applyToHost: () => Effect.Effect<void, any>;
   readonly timeouts?: Timeouts;
   /** Worktree branch strategy. Set only when the handle is backed by a
@@ -309,6 +312,7 @@ const buildSandboxHandle = (
     providerHandle,
     bindMountHandle,
     applyToHost,
+    nativeGitTarget,
     timeouts,
     branchStrategy,
   } = ctx;
@@ -605,8 +609,9 @@ const buildSandboxHandle = (
                 hostRepoDir,
                 sandboxRepoDir,
                 branch: mergeToHead ? undefined : branch,
-                hostWorktreePath: worktreePath,
+                hostWorktreePath: nativeGitTarget ? undefined : worktreePath,
                 applyToHost,
+                nativeGitTarget,
                 timeouts,
                 keepSourceBranch: mergeToHead,
               },
@@ -756,6 +761,11 @@ export const createSandboxFromWorktree = async (
   let sandbox: SandboxService;
   let sandboxRepoDir: string;
   const isIsolated = options.sandbox.tag === "isolated";
+  // See SandboxLifecycle.ts's nativeGitTarget: set when this provider's repo
+  // isn't reachable via hostRepoDir (e.g. fyreNative()) — git operations in
+  // the lifecycle below must route through the sandbox's own exec instead.
+  const nativeGitTarget =
+    options.sandbox.tag === "none" && options.sandbox.nativeGitTarget === true;
 
   if (isTestMode) {
     sandbox = options._test!.buildSandbox!(worktreePath);
@@ -894,6 +904,7 @@ export const createSandboxFromWorktree = async (
       bindMountHandle,
       providerTag: options.sandbox.tag,
       applyToHost,
+      nativeGitTarget,
       timeouts: options.timeouts,
       branchStrategy: options.branchStrategy,
     },
@@ -917,6 +928,11 @@ export const createSandbox = async (
   const { branch } = options;
   const isTestMode = !!options._test?.buildSandbox;
   const isIsolated = options.sandbox.tag === "isolated";
+  // See SandboxLifecycle.ts's nativeGitTarget: set when this provider's repo
+  // isn't reachable via hostRepoDir (e.g. fyreNative()) — git operations in
+  // the lifecycle below must route through the sandbox's own exec instead.
+  const nativeGitTarget =
+    options.sandbox.tag === "none" && options.sandbox.nativeGitTarget === true;
 
   // Resolve cwd, create the worktree, and set up the sandbox in a single Effect.
   // Once the worktree exists, any later failure (e.g. a missing image surfacing
@@ -1148,6 +1164,7 @@ export const createSandbox = async (
       bindMountHandle,
       providerTag: options.sandbox.tag,
       applyToHost,
+      nativeGitTarget,
       timeouts: options.timeouts,
     },
     async () => {

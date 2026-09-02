@@ -203,6 +203,24 @@ export interface NoSandboxProvider {
   readonly name: string;
   /** Environment variables injected by this provider. */
   readonly env: Record<string, string>;
+  /**
+   * Set when this provider's repo is NOT reachable via the local host's
+   * filesystem at `hostRepoDir` — e.g. a remote-native provider (like
+   * `fyreNative()`) that runs the agent directly against a pre-existing
+   * repository on another machine, reached only through this handle's own
+   * `exec`. `hostRepoDir`/`process.cwd()` have no relationship to where the
+   * work actually happens in that case.
+   *
+   * Defaults to `false`/unset — the traditional no-sandbox case, where the
+   * agent writes directly into `hostRepoDir` and it genuinely is where the
+   * work happened.
+   *
+   * When `true`, `SandboxLifecycle.ts`'s branch-strategy/merge/diff-collection
+   * step runs its git operations through this handle's `exec` (targeting its
+   * `worktreePath`) instead of the local host's git — otherwise those
+   * operations would silently run against the wrong repository.
+   */
+  readonly nativeGitTarget?: boolean;
   /** @internal Create a sandbox handle. `interactiveExec` must be
    *  implemented — `interactive()`'s default provider genuinely requires it
    *  at runtime; see the doc comment on `SandboxHandle.interactiveExec`. */

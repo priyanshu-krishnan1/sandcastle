@@ -421,7 +421,13 @@ export const orchestrate = (
       // SandboxLifecycleResult<WithSandboxResult<...>> wrapping.
       const iterationEffect = factory.withSandbox(
         (
-          { hostWorktreePath, sandboxRepoPath, applyToHost, bindMountHandle },
+          {
+            hostWorktreePath,
+            sandboxRepoPath,
+            applyToHost,
+            bindMountHandle,
+            nativeGitTarget,
+          },
           sandbox,
         ) =>
           withSandboxLifecycle(
@@ -432,6 +438,7 @@ export const orchestrate = (
               branch,
               hostWorktreePath,
               applyToHost,
+              nativeGitTarget,
               signal: options.signal,
               timeouts: options.timeouts,
               keepSourceBranch: options.keepSourceBranch,

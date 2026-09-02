@@ -1654,3 +1654,97 @@ describe("withSandboxLifecycleImpl — GitClient injection", () => {
     expect(deleteBranch).toHaveBeenCalledWith(hostDir, "sandcastle/test");
   });
 });
+
+describe("withSandboxLifecycle — nativeGitTarget", () => {
+  // Regression coverage for the bug where a remote-native provider (e.g.
+  // fyreNative()) had its branch-strategy/merge/diff-collection git
+  // operations silently run against hostRepoDir on the local machine —
+  // unrelated to where the agent actually worked — instead of the
+  // provider's real repo, reached only through the sandbox's own exec.
+
+  const setupRemoteRepo = async () => {
+    // Deliberately NOT a git repo at all. If withSandboxLifecycle ever fell
+    // back to LocalGitClient against hostRepoDir (the pre-fix bug), every
+    // git op below would fail immediately against a directory with no .git
+    // — so the test passing at all is itself part of the proof.
+    const hostRepoDir = await mkdtemp(join(tmpdir(), "not-a-repo-"));
+
+    // Stands in for a provider's pre-existing remote repo (fyreNative's
+    // repoPath) — reached only via `sandbox.exec`, exactly like real SSH
+    // exec would be, just running locally under the test. The branch is
+    // checked out but has no extra commit yet — the agent's commit happens
+    // inside work(), matching the real lifecycle order (baseHead is
+    // captured before work() runs).
+    const sandboxRepoDir = await mkdtemp(join(tmpdir(), "remote-repo-"));
+    await initRepo(sandboxRepoDir);
+    await commitFile(sandboxRepoDir, "a.txt", "a", "initial");
+    await execAsync("git checkout -b sandcastle/test", {
+      cwd: sandboxRepoDir,
+    });
+
+    const sandbox = makeLocalSandbox(sandboxRepoDir);
+    return { hostRepoDir, sandboxRepoDir, sandbox };
+  };
+
+  it("collects commits made during work(), routed entirely through the sandbox's own exec, never touching a non-git hostRepoDir", async () => {
+    const { hostRepoDir, sandboxRepoDir, sandbox } = await setupRemoteRepo();
+
+    const result = await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir,
+          sandboxRepoDir,
+          branch: "sandcastle/test",
+          nativeGitTarget: true,
+        },
+        sandbox,
+        (ctx) =>
+          Effect.gen(function* () {
+            yield* ctx.sandbox.exec(
+              'sh -c "echo b > b.txt && git add b.txt && git commit -m \\"agent change\\""',
+              { cwd: ctx.sandboxRepoDir },
+            );
+          }),
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    expect(result.branch).toBe("sandcastle/test");
+    expect(result.commits).toHaveLength(1);
+
+    // hostRepoDir was never touched — still not a git repo.
+    await expect(
+      execAsync("git rev-parse --git-dir", { cwd: hostRepoDir }),
+    ).rejects.toThrow();
+  });
+
+  it("propagates identity read from sandboxRepoDir, not hostRepoDir", async () => {
+    const { hostRepoDir, sandboxRepoDir, sandbox } = await setupRemoteRepo();
+
+    await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir,
+          sandboxRepoDir,
+          branch: "sandcastle/test",
+          nativeGitTarget: true,
+        },
+        sandbox,
+        () => Effect.void,
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
+
+    // initRepo() set this identity on sandboxRepoDir (the "remote" repo).
+    // If identity had been read from hostRepoDir (not a git repo at all),
+    // it would resolve to empty strings instead — identity() is best-effort
+    // and degrades silently rather than throwing.
+    const name = await execAsync("git config user.name", {
+      cwd: sandboxRepoDir,
+    });
+    expect(name.stdout.trim()).toBe("Test");
+  });
+
+  // The default (nativeGitTarget unset) path — LocalGitClient against
+  // hostRepoDir — is already covered by every other test in this file
+  // (e.g. "commits in worktree are cherry-picked onto host's current
+  // branch" above), which would fail if this change had disturbed it.
+});

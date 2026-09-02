@@ -126,6 +126,11 @@ export interface SandboxInfo {
   readonly applyToHost?: () => Effect.Effect<void, SyncError>;
   /** The bind-mount sandbox handle, available when the provider is a bind-mount provider. Used for session capture. */
   readonly bindMountHandle?: SandboxHandle;
+  /** Mirrors `NoSandboxProvider.nativeGitTarget` — set when this provider's
+   *  repo isn't reachable via the host's local filesystem, so
+   *  `SandboxLifecycle.ts` routes git operations through the sandbox's own
+   *  `exec` instead of the local host's git. */
+  readonly nativeGitTarget?: boolean;
 }
 
 export interface WithSandboxResult<A> {
@@ -410,10 +415,19 @@ export const startSandboxAgainstTarget = (
           env,
           worktreeOrRepoPath: targetPath,
         });
+        // A nativeGitTarget provider's repo isn't targetPath (a local path
+        // computed for a worktree that may not even be relevant) — it's
+        // whatever the handle itself reports as worktreePath (e.g.
+        // fyreNative's repoPath). Report no hostWorktreePath at all so
+        // SandboxLifecycle.ts doesn't treat a meaningless local path as the
+        // repo location.
         return {
           sandboxInfo: {
-            hostWorktreePath: targetPath,
+            hostWorktreePath: sandboxProvider.nativeGitTarget
+              ? undefined
+              : targetPath,
             sandboxRepoPath: worktreePath,
+            nativeGitTarget: sandboxProvider.nativeGitTarget,
           },
           sandbox,
           handle,

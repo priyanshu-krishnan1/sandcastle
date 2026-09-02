@@ -406,7 +406,11 @@ export interface FyreNativeOptions {
  *
  * Because this provider has tag `"none"`, Sandcastle skips sync-in entirely.
  * The agent executes inside `repoPath` on the remote host using the branch
- * strategy of your choice (merge-to-head, branch, or head).
+ * strategy of your choice (merge-to-head, branch, or head) — `nativeGitTarget`
+ * (set below) tells SandboxLifecycle.ts to run those branch-strategy/merge/
+ * diff-collection git operations through this handle's own SSH exec against
+ * `repoPath`, instead of against the local host's git, which has no relation
+ * to where the agent actually worked.
  *
  * @example
  * ```typescript
@@ -424,6 +428,11 @@ export const fyreNative = (options: FyreNativeOptions): NoSandboxProvider => ({
   tag: "none",
   name: "fyre-native",
   env: options.env ?? {},
+  // repoPath lives on the remote host, not under the local hostRepoDir —
+  // branch-strategy/merge/diff-collection must run via this handle's own
+  // SSH exec against repoPath, not the local host's git. See
+  // NoSandboxProvider.nativeGitTarget.
+  nativeGitTarget: true,
 
   create: async (createOptions): Promise<SandboxHandle> => {
     // Ignore the framework-supplied worktreePath (local temp dir) and use the

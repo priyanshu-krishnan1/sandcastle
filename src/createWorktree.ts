@@ -378,8 +378,14 @@ export const createWorktree = async (
             // host's current branch and merges the worktree's commits back into
             // it. branch strategy: pin to the worktree's branch.
             branch: isMergeToHead ? undefined : worktreeInfo.branch,
-            hostWorktreePath: worktreeInfo.path,
+            // worktreeInfo.path is the local worktree createWorktree() itself
+            // created — meaningless as a git target for a nativeGitTarget
+            // provider, whose repo lives elsewhere entirely.
+            hostWorktreePath: sandboxInfo.nativeGitTarget
+              ? undefined
+              : worktreeInfo.path,
             applyToHost: sandboxInfo.applyToHost ?? (() => Effect.void),
+            nativeGitTarget: sandboxInfo.nativeGitTarget,
             timeouts: options.timeouts,
             keepSourceBranch: isMergeToHead,
           },
