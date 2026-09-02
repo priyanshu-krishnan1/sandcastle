@@ -10,7 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import type { IsolatedSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 import { SyncError } from "./errors.js";
 
 /**
@@ -42,7 +42,7 @@ const execHost = (
  * Execute a command in the sandbox, failing with SyncError if it exits non-zero.
  */
 const execOk = (
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
   command: string,
   options?: { cwd?: string },
 ): Effect.Effect<
@@ -79,7 +79,7 @@ const execOk = (
  */
 export const syncIn = (
   hostRepoDir: string,
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
 ): Effect.Effect<{ branch: string }, SyncError> =>
   Effect.gen(function* () {
     // Get current branch from host
@@ -114,7 +114,9 @@ export const syncIn = (
         const bundleSandboxPath = `${sandboxTmpDir}/repo.bundle`;
 
         yield* Effect.tryPromise({
-          try: () => handle.copyIn(bundleHostPath, bundleSandboxPath),
+          // `transfer` is guaranteed present — syncIn is only ever called
+          // with an isolated provider's handle.
+          try: () => handle.transfer!.copyIn(bundleHostPath, bundleSandboxPath),
           catch: (e) =>
             new SyncError({
               message: `Failed to copy bundle into sandbox: ${e instanceof Error ? e.message : String(e)}`,

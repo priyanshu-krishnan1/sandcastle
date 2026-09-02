@@ -39,7 +39,7 @@ vi.mock("./mountUtils.js", async (importOriginal) => {
 import { interactive } from "./interactive.js";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { bob } from "./AgentProvider.js";
@@ -49,12 +49,10 @@ const makeInteractiveProvider = () =>
   createBindMountSandboxProvider({
     name: "capture-interactive",
     create: async (options) => {
-      const handle: BindMountSandboxHandle = {
+      const handle: SandboxHandle = {
         worktreePath: options.worktreePath,
         exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
         interactiveExec: async () => ({ exitCode: 0 }),
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       };
       return handle;

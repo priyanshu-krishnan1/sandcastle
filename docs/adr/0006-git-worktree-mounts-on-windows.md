@@ -71,6 +71,7 @@ and `startSandbox`. It:
    `SANDBOX_REPO_DIR/.git`.
 
 The function handles both scenarios:
+
 - **Host repo is a worktree** — replaces the `.git` file mount already in
   `gitMounts` from `resolveGitMounts`.
 - **Sandcastle-created worktree** — adds a new overlay mount, since the `.git`

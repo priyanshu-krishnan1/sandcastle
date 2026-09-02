@@ -10,7 +10,7 @@
 
 import { access, readdir } from "node:fs/promises";
 import { join, posix, relative } from "node:path";
-import type { BindMountSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 
 // ---------------------------------------------------------------------------
 // Host session lookup
@@ -110,7 +110,7 @@ export const claudeSubagentsDirOnHost = (
 export const listClaudeSubagentSessionsInSandbox = async (
   cwd: string,
   id: string,
-  handle: Pick<BindMountSandboxHandle, "exec">,
+  handle: Pick<SandboxHandle, "exec">,
   sandboxProjectsDir: string,
 ): Promise<string[]> => {
   const dir = claudeSubagentsDirInSandbox(cwd, id, sandboxProjectsDir);
@@ -260,7 +260,7 @@ export const locateCodexHostSession = async (
 
 export const locateCodexSandboxSession = async (
   id: string,
-  handle: Pick<BindMountSandboxHandle, "exec">,
+  handle: Pick<SandboxHandle, "exec">,
   sessionsDir: string,
 ): Promise<CodexSessionLocation> => {
   const result = await handle.exec(
@@ -373,7 +373,7 @@ export const locatePiHostSession = async (
 
 export const locatePiSandboxSession = async (
   id: string,
-  handle: Pick<BindMountSandboxHandle, "exec">,
+  handle: Pick<SandboxHandle, "exec">,
   sessionsDir: string,
 ): Promise<PiSessionLocation> => {
   const result = await handle.exec(

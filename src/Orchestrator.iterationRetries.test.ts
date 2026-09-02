@@ -15,7 +15,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { bob } from "./AgentProvider.js";
 import { orchestrate } from "./Orchestrator.js";
 import { AgentError } from "./errors.js";
@@ -25,6 +25,12 @@ import { makeLocalSandbox } from "./testSandbox.js";
 import { agentStreamEmitterLayer } from "./AgentStreamEmitter.js";
 import { SilentDisplay, type DisplayEntry } from "./Display.js";
 import type { DockerError } from "./errors.js";
+
+// Every test here does at least one real sandbox-lifecycle cycle (worktree
+// creation + git identity + commit collection), some with retry backoff on
+// top; under full-suite parallel load that can exceed vitest's 5s default,
+// same class of flake fixed for syncOut.test.ts elsewhere in this repo.
+vi.setConfig({ testTimeout: 30000 });
 
 const execAsync = promisify(exec);
 
@@ -92,12 +98,13 @@ const makeTestSandboxFactory = (
           ) as Effect.Effect<A, E | DockerError, R>,
         (_) =>
           Effect.promise(async () => {
-            await execAsync(
-              `git worktree remove "${sandboxBaseDir}" --force`,
-              { cwd: hostRepoDir },
-            ).catch(() => {});
+            await execAsync(`git worktree remove "${sandboxBaseDir}" --force`, {
+              cwd: hostRepoDir,
+            }).catch(() => {});
           }),
-      ).pipe(Effect.map((value) => ({ value, preservedWorktreePath: undefined }))),
+      ).pipe(
+        Effect.map((value) => ({ value, preservedWorktreePath: undefined })),
+      ),
   });
 };
 
@@ -278,7 +285,11 @@ describe("Orchestrator iterationRetries", () => {
             } else {
               // Intermediate success: emit plain text, no completion signal
               options.onLine(
-                JSON.stringify({ type: "message", role: "assistant", content: "partial progress" }),
+                JSON.stringify({
+                  type: "message",
+                  role: "assistant",
+                  content: "partial progress",
+                }),
               );
             }
             return Effect.succeed({ stdout: "", stderr: "", exitCode: 0 });

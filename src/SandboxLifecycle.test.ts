@@ -1,15 +1,26 @@
 import { Effect, Layer, Ref } from "effect";
 import { exec } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type DisplayEntry, SilentDisplay } from "./Display.js";
 import { type SandboxService } from "./SandboxFactory.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 import { ExecError, SyncError } from "./errors.js";
-import { withSandboxLifecycle, runHostHooks } from "./SandboxLifecycle.js";
+import {
+  withSandboxLifecycle,
+  withSandboxLifecycleImpl,
+  runHostHooks,
+} from "./SandboxLifecycle.js";
+import { GitClient, type GitClientService } from "./GitClient.js";
 
 /**
  * Creates a sandbox that translates container paths to host paths,
@@ -1478,7 +1489,9 @@ describe("runHostHooks", () => {
   });
 
   it("uses the provided cwd", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "host-hooks-"));
+    // Resolved so `pwd`'s OS-resolved output (e.g. macOS's /tmp -> /private/tmp)
+    // compares equal to the directory we actually passed as cwd.
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "host-hooks-")));
 
     await Effect.runPromise(runHostHooks([{ command: "pwd > cwd.txt" }], dir));
 
@@ -1534,5 +1547,110 @@ describe("runHostHooks", () => {
 
     const content = await readFile(join(dir, "timeout-default.txt"), "utf-8");
     expect(content.trim()).toBe("ok");
+  });
+});
+
+describe("withSandboxLifecycleImpl — GitClient injection", () => {
+  const setupWorktree = async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "host-"));
+    await execAsync("git init -b main", { cwd: hostDir });
+    await execAsync('git config user.email "test@test.com"', { cwd: hostDir });
+    await execAsync('git config user.name "Test"', { cwd: hostDir });
+    await writeFile(join(hostDir, "file.txt"), "original");
+    await execAsync("git add file.txt", { cwd: hostDir });
+    await execAsync('git commit -m "initial commit"', { cwd: hostDir });
+
+    const worktreesDir = join(hostDir, ".sandcastle", "worktrees");
+    await mkdir(worktreesDir, { recursive: true });
+    const worktreeDir = join(worktreesDir, "test-worktree");
+    await execAsync(
+      `git worktree add -b "sandcastle/test" "${worktreeDir}" HEAD`,
+      { cwd: hostDir },
+    );
+
+    const sandbox = makeLocalSandbox(worktreeDir);
+    return { hostDir, worktreeDir, sandbox };
+  };
+
+  const makeFakeGitClient = (
+    overrides: Partial<GitClientService> = {},
+  ): GitClientService => ({
+    currentBranch: () => Effect.succeed("fake-current-branch"),
+    identity: () =>
+      Effect.succeed({ name: "Fake User", email: "fake@example.com" }),
+    revParseHead: () => Effect.succeed("fakeabc123"),
+    hasCommitsInRange: () => Effect.succeed(false),
+    revList: () => Effect.succeed([]),
+    mergeBranch: () => Effect.void,
+    deleteBranch: () => Effect.void,
+    ...overrides,
+  });
+
+  it("propagates identity from the injected GitClient, not real host git", async () => {
+    const { hostDir, worktreeDir, sandbox } = await setupWorktree();
+    const fakeGitClient = makeFakeGitClient();
+
+    await Effect.runPromise(
+      withSandboxLifecycleImpl(
+        { hostRepoDir: hostDir, sandboxRepoDir: worktreeDir },
+        sandbox,
+        () => Effect.void,
+      ).pipe(
+        Effect.provide(testDisplayLayer),
+        Effect.provide(Layer.succeed(GitClient, fakeGitClient)),
+      ),
+    );
+
+    // The sandbox's propagated git identity must come from the fake, not
+    // from whatever `git config user.name`/`user.email` the real host repo
+    // has — proving withSandboxLifecycleImpl genuinely depends on the
+    // injected GitClient rather than a hardcoded git call. Query `--global`
+    // explicitly: `setupWorktree()` also sets a *local* identity on the host
+    // repo (inherited by the worktree), which would otherwise shadow the
+    // `--global` value this lifecycle step writes, since local outranks
+    // global in git's config precedence.
+    const name = await Effect.runPromise(
+      sandbox.exec("git config --global user.name", { cwd: worktreeDir }),
+    );
+    const email = await Effect.runPromise(
+      sandbox.exec("git config --global user.email", { cwd: worktreeDir }),
+    );
+    expect(name.stdout.trim()).toBe("Fake User");
+    expect(email.stdout.trim()).toBe("fake@example.com");
+  });
+
+  it("calls currentBranch, mergeBranch, and deleteBranch on the injected GitClient with the expected arguments", async () => {
+    const { hostDir, worktreeDir, sandbox } = await setupWorktree();
+
+    const currentBranch = vi.fn(() => Effect.succeed("main"));
+    const mergeBranch = vi.fn(() => Effect.void);
+    const deleteBranch = vi.fn(() => Effect.void);
+    const fakeGitClient = makeFakeGitClient({
+      currentBranch,
+      hasCommitsInRange: () => Effect.succeed(true),
+      mergeBranch,
+      deleteBranch,
+    });
+
+    await Effect.runPromise(
+      withSandboxLifecycleImpl(
+        { hostRepoDir: hostDir, sandboxRepoDir: worktreeDir },
+        sandbox,
+        () => Effect.void,
+      ).pipe(
+        Effect.provide(testDisplayLayer),
+        Effect.provide(Layer.succeed(GitClient, fakeGitClient)),
+      ),
+    );
+
+    expect(currentBranch).toHaveBeenCalledWith(hostDir);
+    // resolvedBranch is discovered inside the sandbox via `sandbox.exec`
+    // (not GitClient) — it's whatever branch `git worktree add` checked out.
+    expect(mergeBranch).toHaveBeenCalledWith(
+      hostDir,
+      "sandcastle/test",
+      "main",
+    );
+    expect(deleteBranch).toHaveBeenCalledWith(hostDir, "sandcastle/test");
   });
 });

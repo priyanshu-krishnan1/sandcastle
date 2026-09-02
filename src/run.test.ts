@@ -208,8 +208,7 @@ describe("RunResult", () => {
       iterations: [
         {
           sessionId: "abc-123",
-          sessionFilePath:
-            "/home/user/.sessions/-home-user-repo/abc-123.jsonl",
+          sessionFilePath: "/home/user/.sessions/-home-user-repo/abc-123.jsonl",
         },
       ],
       completionSignal: undefined,
@@ -595,9 +594,9 @@ describe("buildLogFilename", () => {
   });
 
   it("includes agent name when branch contains agent segment", () => {
-    expect(
-      buildLogFilename("sandcastle/bob/20260325-142719", "main"),
-    ).toBe("main-sandcastle-bob-20260325-142719.log");
+    expect(buildLogFilename("sandcastle/bob/20260325-142719", "main")).toBe(
+      "main-sandcastle-bob-20260325-142719.log",
+    );
   });
 
   it("appends run name when name is provided", () => {
@@ -1031,17 +1030,13 @@ describe("structured output error carries the failed session id", () => {
         options?: { onLine?: (line: string) => void },
       ) => {
         if (options?.onLine) {
-          options.onLine(
-            '{"type":"session_id","sessionId":"sess-abc-123"}',
-          );
+          options.onLine('{"type":"session_id","sessionId":"sess-abc-123"}');
           options.onLine(
             '{"type":"result","status":"success","result":"<result>not valid json</result>"}',
           );
         }
         return { stdout: "", stderr: "", exitCode: 0 };
       },
-      copyFileIn: async () => {},
-      copyFileOut: async () => {},
       close: async () => {},
     }),
   });

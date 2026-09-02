@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SilentDisplay, type DisplayEntry } from "./Display.js";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type SandboxProvider,
 } from "./SandboxProvider.js";
 import {
@@ -42,11 +42,9 @@ const noopProvider = (): SandboxProvider =>
   createBindMountSandboxProvider({
     name: "test-provider",
     create: async () => {
-      const handle: BindMountSandboxHandle = {
+      const handle: SandboxHandle = {
         worktreePath: SANDBOX_REPO_DIR,
         exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       };
       return handle;

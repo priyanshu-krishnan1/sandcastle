@@ -35,18 +35,18 @@ import {
   runHostHooks,
   type SandboxHooks,
 } from "./SandboxLifecycle.js";
+import { WorktreeError } from "./errors.js";
 import {
   type SandboxService,
   SandboxFactory,
   SANDBOX_REPO_DIR,
   resolveGitMounts,
   makeSandboxFromHandle,
+  printWorktreePreservedMessage,
 } from "./SandboxFactory.js";
 import type {
   SandboxProvider,
-  BindMountSandboxHandle,
-  IsolatedSandboxHandle,
-  NoSandboxHandle,
+  SandboxHandle,
   MergeToHeadBranchStrategy,
   NamedBranchStrategy,
   ExecResult,
@@ -93,7 +93,7 @@ export interface CreateSandboxOptions {
      * Only honored when `sandbox.tag === "bind-mount"`. Used to exercise the
      * `bindMountHandle` flow in tests without booting a real container.
      */
-    readonly bindMountHandle?: BindMountSandboxHandle;
+    readonly bindMountHandle?: SandboxHandle;
   };
 }
 
@@ -241,7 +241,7 @@ export interface Sandbox {
    *
    * Returns the full `ExecResult` — non-zero `exitCode` is surfaced, not
    * thrown. Callers that want strict semantics should check `result.exitCode`
-   * themselves (matching the contract of `BindMountSandboxHandle.exec`).
+   * themselves (matching the contract of `SandboxHandle.exec`).
    */
   exec(command: string, options?: SandboxExecOptions): Promise<ExecResult>;
   /** Tear down the sandbox and worktree. */
@@ -269,19 +269,15 @@ interface SandboxHandleContext {
   readonly hostRepoDir: string;
   readonly sandboxRepoDir: string;
   readonly sandbox: SandboxService;
-  readonly providerHandle:
-    | BindMountSandboxHandle
-    | IsolatedSandboxHandle
-    | NoSandboxHandle
-    | undefined;
+  readonly providerHandle: SandboxHandle | undefined;
   /**
    * Pre-narrowed bind-mount handle, set when the provider is a bind-mount
    * provider. Required by the orchestrator's session capture path
    * (`AgentSessionStorage.captureToHost/resumeIntoSandbox`), which is typed
-   * on `BindMountSandboxHandle` and calls `copyFileOut`/`copyFileIn` —
+   * on `SandboxHandle` and calls `copyFileOut`/`copyFileIn` —
    * methods that no-sandbox and isolated handles do not implement.
    */
-  readonly bindMountHandle: BindMountSandboxHandle | undefined;
+  readonly bindMountHandle: SandboxHandle | undefined;
   /** Provider tag, used by resumeSession to dispatch the host-side session lookup. */
   readonly providerTag: SandboxProvider["tag"];
   readonly applyToHost: () => Effect.Effect<void, any>;
@@ -358,7 +354,6 @@ const buildSandboxHandle = (
       if (runOptions.resumeSession) {
         await assertResumeSessionExists({
           provider,
-          sandboxTag: ctx.providerTag,
           hostRepoDir,
           resumeSession: runOptions.resumeSession,
         });
@@ -725,7 +720,7 @@ export interface CreateSandboxFromWorktreeOptions {
      * Fake bind-mount handle exposed to the orchestrator's session-capture path.
      * Only honored when `sandbox.tag === "bind-mount"`.
      */
-    readonly bindMountHandle?: BindMountSandboxHandle;
+    readonly bindMountHandle?: SandboxHandle;
   };
 }
 
@@ -757,11 +752,7 @@ export const createSandboxFromWorktree = async (
   }
 
   // 2. Start sandbox via provider or local sandbox layer (test mode)
-  let providerHandle:
-    | BindMountSandboxHandle
-    | IsolatedSandboxHandle
-    | NoSandboxHandle
-    | undefined;
+  let providerHandle: SandboxHandle | undefined;
   let sandbox: SandboxService;
   let sandboxRepoDir: string;
   const isIsolated = options.sandbox.tag === "isolated";
@@ -800,7 +791,16 @@ export const createSandboxFromWorktree = async (
     } else {
       startEffect = resolveGitMounts(join(hostRepoDir, ".git")).pipe(
         Effect.provide(NodeFileSystem.layer),
-        Effect.catchAll(() => Effect.succeed([])),
+        // Matches SandboxFactory.ts's resolveAndPatchGitMounts: a failure to
+        // resolve git mounts must fail the sandbox start, not silently start
+        // it with no git mounts at all (which was this file's prior
+        // behavior — Effect.catchAll(() => Effect.succeed([]))).
+        Effect.mapError(
+          (e) =>
+            new WorktreeError({
+              message: `Failed to resolve git mounts: ${e}`,
+            }),
+        ),
         // Patch git mounts for Windows worktree compatibility (ADR-0006)
         Effect.flatMap((gitMounts) =>
           patchGitMountsForWindows(gitMounts, worktreePath, SANDBOX_REPO_DIR),
@@ -858,7 +858,7 @@ export const createSandboxFromWorktree = async (
   // 4. Build applyToHost callback
   const applyToHost =
     isIsolated && providerHandle
-      ? () => syncOut(worktreePath, providerHandle as IsolatedSandboxHandle)
+      ? () => syncOut(worktreePath, providerHandle as SandboxHandle)
       : () => Effect.void;
 
   // 5. Build and return sandbox handle — container-only close (worktree owns worktree)
@@ -870,7 +870,7 @@ export const createSandboxFromWorktree = async (
   // turning a missing-feature into a runtime SessionCaptureError.
   const bindMountHandle =
     options.sandbox.tag === "bind-mount"
-      ? (providerHandle as BindMountSandboxHandle | undefined)
+      ? (providerHandle as SandboxHandle | undefined)
       : undefined;
 
   return buildSandboxHandle(
@@ -949,11 +949,7 @@ export const createSandbox = async (
           }
 
           // Start the sandbox via the test layer or the shared startSandbox helper.
-          let providerHandle:
-            | BindMountSandboxHandle
-            | IsolatedSandboxHandle
-            | NoSandboxHandle
-            | undefined;
+          let providerHandle: SandboxHandle | undefined;
           let sandbox: SandboxService;
           let sandboxRepoDir: string;
 
@@ -986,7 +982,13 @@ export const createSandbox = async (
                   })
                 : resolveGitMounts(join(hostRepoDir, ".git")).pipe(
                     Effect.provide(NodeFileSystem.layer),
-                    Effect.catchAll(() => Effect.succeed([])),
+                    // See the matching comment in createSandboxFromWorktree above.
+                    Effect.mapError(
+                      (e) =>
+                        new WorktreeError({
+                          message: `Failed to resolve git mounts: ${e}`,
+                        }),
+                    ),
                     // Patch git mounts for Windows worktree compatibility (ADR-0006)
                     Effect.flatMap((gitMounts) =>
                       patchGitMountsForWindows(
@@ -1064,7 +1066,7 @@ export const createSandbox = async (
   // Build applyToHost callback (once, reused across runs)
   const applyToHost =
     isIsolated && providerHandle
-      ? () => syncOut(worktreePath, providerHandle as IsolatedSandboxHandle)
+      ? () => syncOut(worktreePath, providerHandle as SandboxHandle)
       : () => Effect.void;
 
   let closed = false;
@@ -1095,6 +1097,12 @@ export const createSandbox = async (
           worktreePath,
         ).pipe(Effect.catchAll(() => Effect.succeed(false)));
         if (isDirty) {
+          // Matches SandboxFactory.ts's cleanupWorktree: tell the user a
+          // worktree was left on disk instead of preserving it silently.
+          printWorktreePreservedMessage(
+            worktreePath,
+            `Worktree preserved at ${worktreePath}`,
+          );
           return { preservedWorktreePath: worktreePath };
         }
 
@@ -1111,7 +1119,7 @@ export const createSandbox = async (
   // handle (which lack copyFileIn/copyFileOut) to AgentSessionStorage.
   const bindMountHandle =
     options.sandbox.tag === "bind-mount"
-      ? (providerHandle as BindMountSandboxHandle | undefined)
+      ? (providerHandle as SandboxHandle | undefined)
       : undefined;
 
   // Return the Sandbox handle

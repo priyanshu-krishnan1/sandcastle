@@ -12,6 +12,7 @@ import {
   withTimeout,
   type SandboxError,
 } from "./errors.js";
+import { GitClient, LocalGitClient } from "./GitClient.js";
 import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
 import type { Timeouts } from "./run.js";
 import { countCommitsToSync } from "./syncOut.js";
@@ -39,7 +40,7 @@ const isTransientExecError = (err: ExecError | GitSetupTimeoutError): boolean =>
   err.exitCode !== undefined &&
   TRANSIENT_EXEC_EXIT_CODES.has(err.exitCode);
 
-const execOk = (
+export const execOk = (
   sandbox: SandboxService,
   command: string,
   options?: { cwd?: string; sudo?: boolean },
@@ -175,13 +176,27 @@ export interface SandboxLifecycleResult<A> {
   readonly commits: { sha: string }[];
 }
 
-export const withSandboxLifecycle = <A>(
+/**
+ * `GitClient`-parameterized implementation — genuinely requires `GitClient`
+ * rather than hardcoding host git operations, so a future remote-native
+ * `GitClient` implementation can run the same lifecycle against a target
+ * whose repo isn't on the local filesystem. Exported (rather than kept
+ * private) so callers — and tests — can provide a different `GitClient`
+ * layer; `withSandboxLifecycle` below is the common case, providing
+ * `LocalGitClient` by default so every existing caller is unaffected.
+ */
+export const withSandboxLifecycleImpl = <A>(
   options: SandboxLifecycleOptions,
   sandbox: SandboxService,
   work: (ctx: SandboxContext) => Effect.Effect<A, SandboxError, Display>,
-): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> =>
+): Effect.Effect<
+  SandboxLifecycleResult<A>,
+  SandboxError,
+  Display | GitClient
+> =>
   Effect.gen(function* () {
     const display = yield* Display;
+    const gitClient = yield* GitClient;
     const { hostRepoDir, sandboxRepoDir, hooks, branch, hostWorktreePath } =
       options;
 
@@ -199,27 +214,12 @@ export const withSandboxLifecycle = <A>(
 
     // Without an explicit branch, record host's current branch for cherry-pick
     const hostCurrentBranch: string | null = !branch
-      ? yield* Effect.promise(async () => {
-          const { stdout } = await execAsync(
-            "git rev-parse --abbrev-ref HEAD",
-            { cwd: hostRepoDir },
-          );
-          return stdout.trim();
-        })
+      ? yield* gitClient.currentBranch(hostRepoDir)
       : null;
 
     // Read host git identity before entering the sandbox
-    const [hostGitName, hostGitEmail] = yield* Effect.promise(async () => {
-      const [nameResult, emailResult] = await Promise.all([
-        execAsync("git config user.name", { cwd: hostRepoDir })
-          .then((r) => r.stdout.trim())
-          .catch(() => ""),
-        execAsync("git config user.email", { cwd: hostRepoDir })
-          .then((r) => r.stdout.trim())
-          .catch(() => ""),
-      ]);
-      return [nameResult, emailResult] as const;
-    });
+    const { name: hostGitName, email: hostGitEmail } =
+      yield* gitClient.identity(hostRepoDir);
 
     // For host-side operations, use hostWorktreePath (the real path on the host)
     // instead of sandboxRepoDir (which may be a sandbox path like /home/agent/workspace).
@@ -372,12 +372,7 @@ export const withSandboxLifecycle = <A>(
     // For bind-mount providers, these are the same. For isolated providers,
     // the host-side SHA is the correct baseline for git rev-list after applyToHost
     // syncs commits back (syncOut creates new SHAs via format-patch/am).
-    const baseHead = yield* Effect.promise(async () => {
-      const { stdout } = await execAsync("git rev-parse HEAD", {
-        cwd: hostSideWorktreePath,
-      });
-      return stdout.trim();
-    });
+    const baseHead = yield* gitClient.revParseHead(hostSideWorktreePath);
 
     // Run the caller's work
     const result = yield* work({ sandbox, sandboxRepoDir, baseHead });
@@ -413,17 +408,10 @@ export const withSandboxLifecycle = <A>(
       // moved) and the diverged case (host branch has new commits since the worktree started).
 
       // Check if there are any new commits on the temp branch
-      const hasNewCommits = yield* Effect.promise(async () => {
-        try {
-          const { stdout } = await execAsync(
-            `git rev-list "${baseHead}..HEAD" --count`,
-            { cwd: hostSideWorktreePath },
-          );
-          return parseInt(stdout.trim(), 10) > 0;
-        } catch {
-          return false;
-        }
-      });
+      const hasNewCommits = yield* gitClient.hasCommitsInRange(
+        hostSideWorktreePath,
+        `${baseHead}..HEAD`,
+      );
 
       // Detach the worktree from the temp branch so the branch can be deleted.
       // Skipped when `keepSourceBranch` is set (createWorktree's merge-to-head
@@ -437,37 +425,21 @@ export const withSandboxLifecycle = <A>(
       if (hasNewCommits) {
         // Fast-forward host's current branch to the temp branch
         yield* display.taskLog(`Merging to ${hostCurrentBranch}`, () =>
-          Effect.tryPromise({
-            try: async () => {
-              try {
-                await execAsync(`git merge "${resolvedBranch}"`, {
-                  cwd: hostRepoDir,
-                });
-              } catch {
-                throw new Error(
-                  `Merge of '${resolvedBranch}' onto '${hostCurrentBranch}' failed. ` +
-                    `The temporary branch '${resolvedBranch}' has been preserved. ` +
-                    `To retry: git merge ${resolvedBranch}, ` +
-                    `then clean up: git branch -D ${resolvedBranch}`,
-                );
-              }
-            },
-            catch: (e) =>
-              new SyncError({
-                message: String(e instanceof Error ? e.message : e),
-              }),
-          }).pipe(
-            withTimeout(
-              mergeToHostTimeoutMs,
-              () =>
-                new MergeToHostTimeoutError({
-                  message: `Merge of '${resolvedBranch}' to '${hostCurrentBranch}' timed out after ${mergeToHostTimeoutMs}ms`,
-                  timeoutMs: mergeToHostTimeoutMs,
-                  sourceBranch: resolvedBranch,
-                  targetBranch: hostCurrentBranch,
-                }),
+          gitClient
+            .mergeBranch(hostRepoDir, resolvedBranch, hostCurrentBranch)
+            .pipe(
+              Effect.mapError((e) => new SyncError({ message: e.message })),
+              withTimeout(
+                mergeToHostTimeoutMs,
+                () =>
+                  new MergeToHostTimeoutError({
+                    message: `Merge of '${resolvedBranch}' to '${hostCurrentBranch}' timed out after ${mergeToHostTimeoutMs}ms`,
+                    timeoutMs: mergeToHostTimeoutMs,
+                    sourceBranch: resolvedBranch,
+                    targetBranch: hostCurrentBranch,
+                  }),
+              ),
             ),
-          ),
         );
       }
 
@@ -475,28 +447,13 @@ export const withSandboxLifecycle = <A>(
       // `keepSourceBranch` is set: the source branch is the worktree's active
       // branch and the worktree's lifetime outlives the lifecycle.
       if (!options.keepSourceBranch) {
-        yield* Effect.promise(() =>
-          execAsync(`git branch -D "${resolvedBranch}"`, {
-            cwd: hostRepoDir,
-          }).catch(() => {}),
-        );
+        yield* gitClient.deleteBranch(hostRepoDir, resolvedBranch);
       }
 
       // Collect the commits now on the host branch
       commits = yield* display.taskLog("Collecting commits", () =>
-        Effect.promise(async () => {
-          try {
-            const { stdout } = await execAsync(
-              `git rev-list "${baseHead}..HEAD" --reverse`,
-              { cwd: hostRepoDir },
-            );
-            const lines = stdout.trim();
-            if (!lines) return [];
-            return lines.split("\n").map((sha) => ({ sha }));
-          } catch {
-            return [];
-          }
-        }).pipe(
+        gitClient.revList(hostRepoDir, `${baseHead}..HEAD`).pipe(
+          Effect.map((shas) => shas.map((sha) => ({ sha }))),
           withTimeout(
             commitCollectionTimeoutMs,
             () =>
@@ -510,31 +467,23 @@ export const withSandboxLifecycle = <A>(
 
       finalBranch = hostCurrentBranch;
     } else {
-      // Explicit branch: commits stay on that branch
+      // Explicit branch: commits stay on that branch. A branch that doesn't
+      // exist on the host yet (no commits were produced) resolves to [] —
+      // `revList` is best-effort, matching the prior try/catch behavior.
       commits = yield* display.taskLog("Collecting commits", () =>
-        Effect.promise(async () => {
-          try {
-            const { stdout } = await execAsync(
-              `git rev-list "${baseHead}..refs/heads/${targetBranch}" --reverse`,
-              { cwd: hostRepoDir },
-            );
-            const lines = stdout.trim();
-            if (!lines) return [];
-            return lines.split("\n").map((sha) => ({ sha }));
-          } catch {
-            // Branch doesn't exist on host (no commits were produced)
-            return [];
-          }
-        }).pipe(
-          withTimeout(
-            commitCollectionTimeoutMs,
-            () =>
-              new CommitCollectionTimeoutError({
-                message: `Commit collection timed out after ${commitCollectionTimeoutMs}ms`,
-                timeoutMs: commitCollectionTimeoutMs,
-              }),
+        gitClient
+          .revList(hostRepoDir, `${baseHead}..refs/heads/${targetBranch}`)
+          .pipe(
+            Effect.map((shas) => shas.map((sha) => ({ sha }))),
+            withTimeout(
+              commitCollectionTimeoutMs,
+              () =>
+                new CommitCollectionTimeoutError({
+                  message: `Commit collection timed out after ${commitCollectionTimeoutMs}ms`,
+                  timeoutMs: commitCollectionTimeoutMs,
+                }),
+            ),
           ),
-        ),
       );
 
       finalBranch = targetBranch;
@@ -542,3 +491,18 @@ export const withSandboxLifecycle = <A>(
 
     return { result, branch: finalBranch, commits };
   });
+
+/**
+ * Runs the sandbox lifecycle (git identity propagation, hooks, merge/commit
+ * collection) against the local host filesystem via `LocalGitClient` — the
+ * default and, today, only `GitClient` implementation. Behavior is identical
+ * to before this seam existed; every existing caller needs no changes.
+ */
+export const withSandboxLifecycle = <A>(
+  options: SandboxLifecycleOptions,
+  sandbox: SandboxService,
+  work: (ctx: SandboxContext) => Effect.Effect<A, SandboxError, Display>,
+): Effect.Effect<SandboxLifecycleResult<A>, SandboxError, Display> =>
+  withSandboxLifecycleImpl(options, sandbox, work).pipe(
+    Effect.provide(LocalGitClient),
+  );

@@ -26,7 +26,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { Effect } from "effect";
 import type { ExecResult, SandboxService } from "./SandboxFactory.js";
-import type { IsolatedSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 import { buildRecoveryMessage, type FailedStep } from "./RecoveryMessage.js";
 import { SyncError } from "./errors.js";
 
@@ -66,7 +66,7 @@ const execHost = (
  * Execute a command in the sandbox, failing with SyncError if it exits non-zero.
  */
 const execOk = (
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
   command: string,
   options?: { cwd?: string },
 ): Effect.Effect<
@@ -95,7 +95,7 @@ const execOk = (
  * Execute a command in the sandbox, returning the result without failing on non-zero exit.
  */
 const execSandbox = (
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
   command: string,
   options?: { cwd?: string },
 ): Effect.Effect<
@@ -218,7 +218,7 @@ export const countCommitsToSync = (
  */
 export const syncOut = (
   hostRepoDir: string,
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
 ): Effect.Effect<void, SyncError> =>
   Effect.gen(function* () {
     const worktreePath = handle.worktreePath;
@@ -307,7 +307,10 @@ export const syncOut = (
           const sandboxPatchPath = `${sandboxPatchDir}/${patchName}`;
           const hostPatchPath = join(patchDir, patchName);
           yield* Effect.tryPromise({
-            try: () => handle.copyFileOut(sandboxPatchPath, hostPatchPath),
+            // `transfer` is guaranteed present — syncOut is only ever called
+            // with an isolated provider's handle.
+            try: () =>
+              handle.transfer!.copyFileOut(sandboxPatchPath, hostPatchPath),
             catch: (e) =>
               new SyncError({
                 message: `Failed to copy patch ${patchName}: ${e instanceof Error ? e.message : String(e)}`,
@@ -344,7 +347,8 @@ export const syncOut = (
         yield* Effect.tryPromise({
           try: async () => {
             await mkdir(dirname(hostFilePath), { recursive: true });
-            await handle.copyFileOut(sandboxFilePath, hostFilePath);
+            // `transfer` is guaranteed present — see the comment above.
+            await handle.transfer!.copyFileOut(sandboxFilePath, hostFilePath);
           },
           catch: (e) =>
             new SyncError({

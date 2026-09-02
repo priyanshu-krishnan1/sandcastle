@@ -1,14 +1,27 @@
-import type { BindMountSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 import type { HostSessionLookup } from "./SessionStore.js";
+import { shellQuote } from "./shellQuote.js";
 
 export type ParsedStreamEvent =
-  | { type: "text"; text: string }
+  | {
+      type: "text";
+      text: string;
+      /**
+       * Whether this text is the agent asserting something, eligible for
+       * completion-signal matching in Orchestrator.ts. Omitted or `true` is
+       * the default — matching every provider's behavior before this field
+       * existed. Explicit `false` marks text that should still reach the
+       * user (chain-of-thought/reasoning commentary) but must never be
+       * scanned for the completion signal, since it can plausibly mention or
+       * quote the signal string without the agent actually asserting
+       * completion — see the `isReasoning` handling below.
+       */
+      assertive?: boolean;
+    }
   | { type: "result"; result: string }
   | { type: "tool_call"; name: string; args: string }
   | { type: "session_id"; sessionId: string }
   | { type: "usage"; usage: IterationUsage };
-
-const shellEscape = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
 
 /** Options passed to buildPrintCommand and buildInteractiveArgs. */
 export interface AgentCommandOptions {
@@ -46,14 +59,14 @@ export interface AgentSessionStorage {
     hostCwd: string;
     sandboxCwd: string;
     sessionId: string;
-    handle: BindMountSandboxHandle;
+    handle: SandboxHandle;
   }): Promise<void>;
   /** Transfer a session JSONL from the host store into the sandbox. */
   resumeIntoSandbox(args: {
     hostCwd: string;
     sandboxCwd: string;
     sessionId: string;
-    handle: BindMountSandboxHandle;
+    handle: SandboxHandle;
   }): Promise<void>;
   /** Read a captured session JSONL from the host store. Returns undefined when absent. */
   readHostSession(cwd: string, sessionId: string): Promise<string | undefined>;
@@ -118,6 +131,26 @@ const extractBobUsage = (stats: unknown): ParsedStreamEvent | undefined => {
 };
 
 /**
+ * Best-effort extraction of bob's task id from a `result` event's `stats`
+ * object, surfaced as a `session_id` event so `IterationResult.sessionId`
+ * gets populated the same way it would for a filesystem-backed provider —
+ * bob has no `AgentSessionStorage` (see the `bob()` factory comment below),
+ * but `resumeSession` already flows into `buildPrintCommand` as `--resume
+ * <task-id>` unconditionally, independent of `sessionStorage`. Without this,
+ * a caller has no way to discover the id a follow-up `run({ resumeSession })`
+ * would need, even though the mechanism already works. `task_id` is named
+ * per IBM's docs (same inferred-not-confirmed basis as `extractBobUsage`'s
+ * fields) — returns undefined rather than guessing when absent or non-string.
+ */
+const extractBobTaskId = (stats: unknown): ParsedStreamEvent | undefined => {
+  if (typeof stats !== "object" || stats === null) return undefined;
+  const taskId = (stats as Record<string, unknown>).task_id;
+  return typeof taskId === "string" && taskId.length > 0
+    ? { type: "session_id", sessionId: taskId }
+    : undefined;
+};
+
+/**
  * Parse Bob-Shell output lines into Sandcastle events.
  * Bob-Shell outputs plain text by default, but may also output structured JSON.
  */
@@ -135,18 +168,31 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
       //   {"type":"error","severity":"...","message":"..."}
       //   {"type":"result","status":"success"|"error","last_message":"...","stats":{...}}
 
-      if (obj.type === "message" && obj.role === "assistant" && obj.isReasoning === true) {
-        // Reasoning content (chain-of-thought style commentary) is dropped
-        // entirely — same treatment as the non-assistant-role guard below.
-        // Reasoning text can plausibly mention or quote the completion signal
-        // string (e.g. "once I see <promise>COMPLETE</promise> I'm done")
-        // without the agent actually asserting completion; letting it into
-        // onText/accumulatedOutput would let the signal-matching in
-        // Orchestrator.ts fire on a thought rather than a real assertion.
-        return [];
+      if (
+        obj.type === "message" &&
+        obj.role === "assistant" &&
+        obj.isReasoning === true
+      ) {
+        // Reasoning content (chain-of-thought style commentary) is surfaced
+        // as text — visible to onText/display — but marked non-assertive so
+        // it can never reach accumulatedOutput. Reasoning text can plausibly
+        // mention or quote the completion signal string (e.g. "once I see
+        // <promise>COMPLETE</promise> I'm done") without the agent actually
+        // asserting completion; letting it into the signal-matching buffer in
+        // Orchestrator.ts would fire on a thought rather than a real
+        // assertion. Previously dropped entirely (`return []`) — that hid
+        // reasoning from the user; assertive:false gets the same safety
+        // without the loss of visibility.
+        return typeof obj.content === "string" && obj.content.length > 0
+          ? [{ type: "text", text: obj.content, assertive: false }]
+          : [];
       }
 
-      if (obj.type === "message" && obj.role === "assistant" && typeof obj.content === "string") {
+      if (
+        obj.type === "message" &&
+        obj.role === "assistant" &&
+        typeof obj.content === "string"
+      ) {
         return [{ type: "text", text: obj.content }];
       }
 
@@ -174,7 +220,9 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
             type: "tool_call",
             name: obj.tool_name,
             args:
-              obj.parameters !== undefined ? JSON.stringify(obj.parameters) : "",
+              obj.parameters !== undefined
+                ? JSON.stringify(obj.parameters)
+                : "",
           },
         ];
       }
@@ -208,6 +256,7 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
 
       if (obj.type === "result") {
         const usageEvent = extractBobUsage(obj.stats);
+        const sessionIdEvent = extractBobTaskId(obj.stats);
         if (obj.status === "success") {
           const text =
             typeof obj.last_message === "string"
@@ -220,6 +269,7 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
               { type: "text", text },
               { type: "result", result: text },
               ...(usageEvent ? [usageEvent] : []),
+              ...(sessionIdEvent ? [sessionIdEvent] : []),
             ];
           }
           // bob run --format stream-json emits {"type":"result","status":"success","stats":{...}}
@@ -232,21 +282,29 @@ const parseBobStreamLine = (line: string): ParsedStreamEvent[] => {
           // <promise>COMPLETE</promise>, causing Orchestrator.ts to report the
           // iteration — and any phase gated on it — as successfully complete
           // even though the actual task was never finished or verified.
-          // Emit nothing but the usage extraction; the real signal-matching
-          // logic in Orchestrator.ts only fires if the agent's own
-          // assistant-message text already contains the completion signal.
-          return usageEvent ? [usageEvent] : [];
+          // Emit nothing but the usage/session-id extraction; the real
+          // signal-matching logic in Orchestrator.ts only fires if the
+          // agent's own assistant-message text already contains the
+          // completion signal.
+          return [
+            ...(usageEvent ? [usageEvent] : []),
+            ...(sessionIdEvent ? [sessionIdEvent] : []),
+          ];
         }
         // error status — route through the tool_call channel (see the
         // top-level {"type":"error"} comment above) rather than text, so a
         // failure result can never be mistaken for a real assistant message
         // eligible for completion-signal matching. Orchestrator.ts's own
-        // exit-code path is what actually fails the run.
+        // exit-code path is what actually fails the run. The task id is
+        // still worth surfacing on a failed turn — it's what a caller would
+        // pass to `resumeSession` to retry against the same task.
         if (obj.status === "error") {
-          const msg = typeof obj.error === "string" ? obj.error : "bob run failed";
+          const msg =
+            typeof obj.error === "string" ? obj.error : "bob run failed";
           return [
             { type: "tool_call", name: "error", args: msg },
             ...(usageEvent ? [usageEvent] : []),
+            ...(sessionIdEvent ? [sessionIdEvent] : []),
           ];
         }
       }
@@ -373,7 +431,11 @@ export const bob = (model: string, options?: BobOptions): AgentProvider => {
   // below.
   const collectSharedArgs = (
     resumeSession?: string,
-  ): { readonly flag: string; readonly value?: string; readonly escape?: boolean }[] => {
+  ): {
+    readonly flag: string;
+    readonly value?: string;
+    readonly escape?: boolean;
+  }[] => {
     const args: { flag: string; value?: string; escape?: boolean }[] = [];
     if (resolvedModel && resolvedModel !== "default") {
       args.push({ flag: "--mode", value: resolvedModel, escape: true });
@@ -398,7 +460,11 @@ export const bob = (model: string, options?: BobOptions): AgentProvider => {
       args.push({ flag: "--disable-subagents" });
     }
     if (options?.workspace !== undefined) {
-      args.push({ flag: "--workspace", value: options.workspace, escape: true });
+      args.push({
+        flag: "--workspace",
+        value: options.workspace,
+        escape: true,
+      });
     }
     if (resumeSession !== undefined) {
       args.push({ flag: "--resume", value: resumeSession, escape: true });
@@ -407,77 +473,85 @@ export const bob = (model: string, options?: BobOptions): AgentProvider => {
   };
 
   return {
-  name: "bob",
-  env: options?.env ?? {},
-  captureSessions: false,
-  // No `sessionStorage` declared: per ADR 0016, resume support requires a
-  // filesystem-backed session record Sandcastle can copy verbatim (as Claude
-  // Code, Codex, and Pi have). Bob's session model is a remote task-id
-  // (`--resume <task-id>` / `--resume latest`), not a file Sandcastle can
-  // read/transfer/rewrite — the same category as OpenCode's SQLite store,
-  // which ADR 0016 explicitly leaves unresumable. `--resume` is still wired
-  // into buildPrintCommand below (see AgentCommandOptions.resumeSession) so
-  // the CLI plumbing exists for when/if a filesystem-backed approach is
-  // designed; it is a harmless no-op today since nothing sets
-  // `resumeSession` for a provider with no `sessionStorage`.
+    name: "bob",
+    env: options?.env ?? {},
+    captureSessions: false,
+    // No `sessionStorage` declared: per ADR 0016, resume support requires a
+    // filesystem-backed session record Sandcastle can copy verbatim (as Claude
+    // Code, Codex, and Pi have). Bob's session model is a remote task-id
+    // (`--resume <task-id>` / `--resume latest`), not a file Sandcastle can
+    // read/transfer/rewrite — the same category as OpenCode's SQLite store,
+    // which ADR 0016 explicitly leaves unresumable. `--resume` is still wired
+    // into buildPrintCommand below (see AgentCommandOptions.resumeSession) so
+    // the CLI plumbing exists for when/if a filesystem-backed approach is
+    // designed; it is a harmless no-op today since nothing sets
+    // `resumeSession` for a provider with no `sessionStorage`.
 
-  buildPrintCommand({ prompt, resumeSession }: AgentCommandOptions): PrintCommand {
-    const flagParts = collectSharedArgs(resumeSession)
-      .concat(
-        trust ? [{ flag: "--trust" }] : [],
-        acceptLicense ? [{ flag: "--accept-license" }] : [],
-      )
-      .map(({ flag, value, escape }) =>
-        value === undefined ? flag : `${flag} ${escape ? shellEscape(value) : value}`,
-      )
-      .join(" ");
-    const flags = flagParts ? ` ${flagParts}` : "";
+    buildPrintCommand({
+      prompt,
+      resumeSession,
+    }: AgentCommandOptions): PrintCommand {
+      const flagParts = collectSharedArgs(resumeSession)
+        .concat(
+          trust ? [{ flag: "--trust" }] : [],
+          acceptLicense ? [{ flag: "--accept-license" }] : [],
+        )
+        .map(({ flag, value, escape }) =>
+          value === undefined
+            ? flag
+            : `${flag} ${escape ? shellQuote(value) : value}`,
+        )
+        .join(" ");
+      const flags = flagParts ? ` ${flagParts}` : "";
 
-    // Optional setup snippet (e.g. sourcing nvm) runs first so Node/bob are
-    // on PATH before the install check executes.
-    const setupPrefix = options?.setupScript
-      ? `${options.setupScript} && `
-      : "";
+      // Optional setup snippet (e.g. sourcing nvm) runs first so Node/bob are
+      // on PATH before the install check executes.
+      const setupPrefix = options?.setupScript
+        ? `${options.setupScript} && `
+        : "";
 
-    // Auto-install bob if it is not present on the remote machine.
-    const installCheck =
-      `if ! type bob >/dev/null 2>&1; then` +
-      ` echo "[sandcastle] bob not found - installing..." >&2;` +
-      ` curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash >&2` +
-      ` || { echo "[sandcastle] bob install failed" >&2; exit 1; };` +
-      ` fi`;
+      // Auto-install bob if it is not present on the remote machine.
+      const installCheck =
+        `if ! type bob >/dev/null 2>&1; then` +
+        ` echo "[sandcastle] bob not found - installing..." >&2;` +
+        ` curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash >&2` +
+        ` || { echo "[sandcastle] bob install failed" >&2; exit 1; };` +
+        ` fi`;
 
-    // After install bob lands in npm's global bin dir — add it to PATH so the
-    // subsequent `bob run` resolves without starting a new login shell.
-    const rehashPath = `export PATH="$(npm root -g 2>/dev/null | sed 's|/node_modules$|/bin|'):$PATH"`;
+      // After install bob lands in npm's global bin dir — add it to PATH so the
+      // subsequent `bob run` resolves without starting a new login shell.
+      const rehashPath = `export PATH="$(npm root -g 2>/dev/null | sed 's|/node_modules$|/bin|'):$PATH"`;
 
-    return {
-      command: `${setupPrefix}${installCheck} && ${rehashPath} && bob run --format stream-json${flags}`,
-      stdin: prompt,
-    };
-  },
+      return {
+        command: `${setupPrefix}${installCheck} && ${rehashPath} && bob run --format stream-json${flags}`,
+        stdin: prompt,
+      };
+    },
 
-  buildInteractiveArgs({ prompt, resumeSession }: AgentCommandOptions): string[] {
-    // Deliberately excludes --trust/--accept-license: those exist only to
-    // skip a first-run prompt when nothing is present to answer it headlessly
-    // (see BobOptions doc comments). An interactive session has a human at
-    // the terminal who should see and answer that prompt themselves, not
-    // have it silently auto-accepted on their behalf.
-    const args = ["bob", "run"];
-    for (const { flag, value } of collectSharedArgs(resumeSession)) {
-      args.push(flag);
-      if (value !== undefined) args.push(value);
-    }
+    buildInteractiveArgs({
+      prompt,
+      resumeSession,
+    }: AgentCommandOptions): string[] {
+      // Deliberately excludes --trust/--accept-license: those exist only to
+      // skip a first-run prompt when nothing is present to answer it headlessly
+      // (see BobOptions doc comments). An interactive session has a human at
+      // the terminal who should see and answer that prompt themselves, not
+      // have it silently auto-accepted on their behalf.
+      const args = ["bob", "run"];
+      for (const { flag, value } of collectSharedArgs(resumeSession)) {
+        args.push(flag);
+        if (value !== undefined) args.push(value);
+      }
 
-    if (prompt) {
-      args.push(prompt);
-    }
+      if (prompt) {
+        args.push(prompt);
+      }
 
-    return args;
-  },
+      return args;
+    },
 
-  parseStreamLine(line: string): ParsedStreamEvent[] {
-    return parseBobStreamLine(line);
-  },
+    parseStreamLine(line: string): ParsedStreamEvent[] {
+      return parseBobStreamLine(line);
+    },
   };
 };

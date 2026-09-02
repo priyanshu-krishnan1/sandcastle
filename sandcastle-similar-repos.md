@@ -5,6 +5,7 @@ Research into GitHub repos similar to [mattpocock/sandcastle](https://github.com
 Organized by how similar the approach is.
 
 ## Tier 1 — Nearly identical concept
+
 TS/programmatic SDK, provider-agnostic agent + sandbox pairing.
 
 - [TwillAI/agentbox-sdk](https://github.com/TwillAI/agentbox-sdk) — the closest analog. Open-source TypeScript SDK, unified API, mix-and-match agents (Claude Code, OpenCode, Codex) with sandbox providers (local Docker, E2B, Modal, Daytona, Vercel).
@@ -14,6 +15,7 @@ TS/programmatic SDK, provider-agnostic agent + sandbox pairing.
 - [intentic/intentic](https://github.com/intentic/intentic) — persistent Docker sandbox per agent plus its own git worktree, self-hosted.
 
 ## Tier 2 — Git-worktree / tmux multi-agent runners
+
 CLI/TUI tools, not host-agnostic sandboxing, but same "parallel agents on branches" problem.
 
 - [smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad) — the most popular one (~5k+ stars); manages Claude Code/Codex/Aider sessions via tmux + git worktrees.
@@ -23,6 +25,7 @@ CLI/TUI tools, not host-agnostic sandboxing, but same "parallel agents on branch
 - [spencermarx/orc](https://github.com/spencermarx/orc) — lightweight worktree + review framework.
 
 ## Tier 3 — Heavier orchestration frameworks
+
 Multi-agent coordination on top of sandboxing.
 
 - [sipyourdrink-ltd/bernstein](https://github.com/sipyourdrink-ltd/bernstein) — deterministic (non-LLM) scheduler for 40+ CLI coding agents, each task in its own git worktree behind merge gates.
@@ -32,7 +35,8 @@ Multi-agent coordination on top of sandboxing.
 - [Yeachan-Heo/oh-my-claudecode](https://github.com/yeachan-heo/oh-my-claudecode) — teams-first multi-agent orchestration layer for Claude Code.
 
 ## Tier 4 — Underlying sandbox infra
-What Sandcastle-style tools plug *into*, not orchestrators themselves.
+
+What Sandcastle-style tools plug _into_, not orchestrators themselves.
 
 - [e2b-dev/e2b](https://github.com/e2b-dev/e2b) — Firecracker microVM sandboxes, JS/Python SDKs; likely the most-used general sandbox backend for these tools.
 - Vercel Sandbox (`@vercel/sandbox`) — already one of Sandcastle's own built-in providers.

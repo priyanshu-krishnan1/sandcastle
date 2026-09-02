@@ -5,4 +5,5 @@ dist
 .claude/settings.local.json.bob/
 .sandcastle
 workflows
-db2-arm-orch
+.bob
+.claude

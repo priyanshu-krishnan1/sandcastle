@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import type { IsolatedSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 
 const execAsync = promisify(exec);
 
@@ -23,7 +23,7 @@ export const execHost = async (
 
 /** Execute a command in the sandbox, throwing if it fails. */
 export const execOk = async (
-  handle: IsolatedSandboxHandle,
+  handle: SandboxHandle,
   command: string,
   options?: { cwd?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {

@@ -175,7 +175,13 @@ const invokeAgent = (
           for (const parsed of provider.parseStreamLine(line)) {
             if (parsed.type === "text") {
               onText(parsed.text);
-              accumulatedOutput += parsed.text;
+              // Non-assertive text (e.g. reasoning/chain-of-thought
+              // commentary) is shown to the user via onText but excluded
+              // from the completion-signal-eligible buffer — see the
+              // `assertive` doc comment on ParsedStreamEvent.
+              if (parsed.assertive !== false) {
+                accumulatedOutput += parsed.text;
+              }
             } else if (parsed.type === "result") {
               resultText = parsed.result;
               accumulatedOutput += parsed.result;

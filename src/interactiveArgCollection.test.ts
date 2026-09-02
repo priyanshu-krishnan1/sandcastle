@@ -16,7 +16,7 @@ vi.mock("@clack/prompts", async (importOriginal) => {
 import { interactive } from "./interactive.js";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type InteractiveExecOptions,
 } from "./SandboxProvider.js";
 import { bob } from "./AgentProvider.js";
@@ -64,7 +64,7 @@ describe("interactive arg collection", () => {
     createBindMountSandboxProvider({
       name: "test-interactive",
       create: async (options) => {
-        const handle: BindMountSandboxHandle = {
+        const handle: SandboxHandle = {
           worktreePath: options.worktreePath,
           exec: async (command) => {
             const result = execSync(command, {
@@ -75,8 +75,6 @@ describe("interactive arg collection", () => {
             return { stdout: result, stderr: "", exitCode: 0 };
           },
           interactiveExec: fakeInteractiveExec,
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         };
         return handle;

@@ -6,11 +6,9 @@
  * requiring Docker or Podman.
  */
 
-import { copyFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type BindMountSandboxProvider,
 } from "../SandboxProvider.js";
 import { createTempSandbox } from "./test-shared.js";
@@ -18,27 +16,20 @@ import { createTempSandbox } from "./test-shared.js";
 /**
  * Create a filesystem-based test bind-mount sandbox provider.
  *
- * The "sandbox" is a temp directory. `exec` runs shell commands in it,
- * `copyFileIn`/`copyFileOut` copy single files between host and the temp dir,
- * and `close` removes the temp dir.
+ * The "sandbox" is a temp directory. `exec` runs shell commands in it, and
+ * `close` removes the temp dir. No `transfer` capability — bind-mount
+ * providers share the host filesystem via mount, so Sandcastle never calls
+ * it (see `SandboxHandle.transfer`'s doc comment).
  */
 export const testBindMount = (): BindMountSandboxProvider =>
   createBindMountSandboxProvider({
     name: "test-bind-mount",
-    create: async (): Promise<BindMountSandboxHandle> => {
+    create: async (): Promise<SandboxHandle> => {
       const temp = await createTempSandbox("sandcastle-test-bm-");
 
       return {
         worktreePath: temp.worktreePath,
         exec: temp.exec,
-        copyFileIn: async (hostPath, sandboxPath) => {
-          await mkdir(dirname(sandboxPath), { recursive: true });
-          await copyFile(hostPath, sandboxPath);
-        },
-        copyFileOut: async (sandboxPath, hostPath) => {
-          await mkdir(dirname(hostPath), { recursive: true });
-          await copyFile(sandboxPath, hostPath);
-        },
         close: temp.close,
       };
     },

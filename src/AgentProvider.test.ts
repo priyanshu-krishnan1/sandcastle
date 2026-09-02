@@ -96,7 +96,9 @@ describe("bob factory", () => {
       error: "bob crashed",
     });
     const events = provider.parseStreamLine(line);
-    expect(events).toEqual([{ type: "tool_call", name: "error", args: "bob crashed" }]);
+    expect(events).toEqual([
+      { type: "tool_call", name: "error", args: "bob crashed" },
+    ]);
     expect(events.some((e) => e.type === "text")).toBe(false);
   });
 
@@ -104,7 +106,9 @@ describe("bob factory", () => {
     const provider = bob("default");
     const line = JSON.stringify({ type: "result", status: "error" });
     const events = provider.parseStreamLine(line);
-    expect(events).toEqual([{ type: "tool_call", name: "error", args: "bob run failed" }]);
+    expect(events).toEqual([
+      { type: "tool_call", name: "error", args: "bob run failed" },
+    ]);
     expect(events.some((e) => e.type === "text")).toBe(false);
   });
 
@@ -160,7 +164,11 @@ describe("bob 2.0 stream-json event mapping", () => {
     });
     const events = provider.parseStreamLine(line);
     expect(events).toEqual([
-      { type: "tool_call", name: "Bash", args: JSON.stringify({ command: "ls -la" }) },
+      {
+        type: "tool_call",
+        name: "Bash",
+        args: JSON.stringify({ command: "ls -la" }),
+      },
     ]);
     expect(events.some((e) => e.type === "text")).toBe(false);
   });
@@ -249,18 +257,36 @@ describe("bob 2.0 stream-json event mapping", () => {
 
   // --- reasoning content (item 2) -------------------------------------------
 
-  it("drops reasoning-flagged assistant messages instead of scanning or surfacing them as text", () => {
-    // Mirrors the existing non-assistant-role guard above: reasoning content
-    // can plausibly discuss or quote the completion signal string without the
-    // agent actually asserting completion (e.g. "once I see <promise>COMPLETE
-    // </promise> I should stop"), so it must never reach onText/
-    // accumulatedOutput.
+  it("surfaces reasoning-flagged assistant messages as non-assertive text, never eligible for completion matching", () => {
+    // Reasoning content can plausibly discuss or quote the completion signal
+    // string without the agent actually asserting completion (e.g. "once I
+    // see <promise>COMPLETE</promise> I should stop"), so it must never reach
+    // Orchestrator.ts's completion-signal-eligible accumulatedOutput buffer —
+    // but it should still be visible to the user via onText, hence
+    // `assertive: false` rather than dropping the event entirely.
     const provider = bob("default");
     const line = JSON.stringify({
       type: "message",
       role: "assistant",
       isReasoning: true,
       content: "Once everything passes I'll emit <promise>COMPLETE</promise>.",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      {
+        type: "text",
+        text: "Once everything passes I'll emit <promise>COMPLETE</promise>.",
+        assertive: false,
+      },
+    ]);
+  });
+
+  it("drops a reasoning-flagged assistant message with no usable content", () => {
+    const provider = bob("default");
+    const line = JSON.stringify({
+      type: "message",
+      role: "assistant",
+      isReasoning: true,
+      content: "",
     });
     expect(provider.parseStreamLine(line)).toEqual([]);
   });
@@ -292,7 +318,9 @@ describe("bob 2.0 stream-json event mapping", () => {
       message: "sandbox disk full",
     });
     const events = provider.parseStreamLine(line);
-    expect(events).toEqual([{ type: "tool_call", name: "error", args: "sandbox disk full" }]);
+    expect(events).toEqual([
+      { type: "tool_call", name: "error", args: "sandbox disk full" },
+    ]);
     expect(events.some((e) => e.type === "text")).toBe(false);
   });
 
@@ -326,6 +354,7 @@ describe("bob 2.0 stream-json event mapping", () => {
           cacheReadInputTokens: 5,
         },
       },
+      { type: "session_id", sessionId: "task-1" },
     ]);
   });
 
@@ -347,6 +376,72 @@ describe("bob 2.0 stream-json event mapping", () => {
         },
       },
     ]);
+  });
+
+  // --- task id extraction from a result event's stats ------------------------
+
+  const zeroedUsage = {
+    type: "usage" as const,
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    },
+  };
+
+  it("extracts the task id as a session_id event from a bare successful result (no text content)", () => {
+    const provider = bob("default");
+    const line = JSON.stringify({
+      type: "result",
+      status: "success",
+      stats: { task_id: "task-42" },
+    });
+    // stats is a non-null object, so extractBobUsage also fires (zeroed —
+    // no token fields present here); both events are independent extractions.
+    expect(provider.parseStreamLine(line)).toEqual([
+      zeroedUsage,
+      { type: "session_id", sessionId: "task-42" },
+    ]);
+  });
+
+  it("extracts the task id even on an error result — a caller may want to retry against it", () => {
+    const provider = bob("default");
+    const line = JSON.stringify({
+      type: "result",
+      status: "error",
+      error: "bob crashed",
+      stats: { task_id: "task-99" },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "error", args: "bob crashed" },
+      zeroedUsage,
+      { type: "session_id", sessionId: "task-99" },
+    ]);
+  });
+
+  it("does not emit a session_id event when task_id is absent, non-string, or stats itself is missing", () => {
+    const provider = bob("default");
+    const missingTaskId = JSON.stringify({
+      type: "result",
+      status: "success",
+      stats: { total_tokens: 10 },
+    });
+    const nonStringTaskId = JSON.stringify({
+      type: "result",
+      status: "success",
+      stats: { task_id: 12345 },
+    });
+    const missingStats = JSON.stringify({
+      type: "result",
+      status: "success",
+      last_message: "done",
+    });
+
+    for (const line of [missingTaskId, nonStringTaskId, missingStats]) {
+      const events = provider.parseStreamLine(line);
+      expect(events.some((e) => e.type === "session_id")).toBe(false);
+    }
   });
 
   // --- BobOptions CLI flags (item 6) -----------------------------------------

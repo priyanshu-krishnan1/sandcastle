@@ -1,12 +1,18 @@
 import { execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { interactive, type InteractiveOptions } from "./interactive.js";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type InteractiveExecOptions,
 } from "./SandboxProvider.js";
 import { bob } from "./AgentProvider.js";
@@ -19,7 +25,12 @@ describe("interactive()", () => {
 
   beforeEach(() => {
     originalCwd = process.cwd();
-    hostDir = mkdtempSync(join(tmpdir(), "sandcastle-interactive-test-"));
+    // Resolved (not mkdtempSync's raw path) so comparisons against paths
+    // that flow through git/OS symlink resolution — e.g. macOS's
+    // /tmp -> /private/tmp — compare equal.
+    hostDir = realpathSync(
+      mkdtempSync(join(tmpdir(), "sandcastle-interactive-test-")),
+    );
     // Initialize a git repo
     execSync("git init", { cwd: hostDir, stdio: "ignore" });
     execSync('git config user.email "test@test.com"', {
@@ -54,7 +65,7 @@ describe("interactive()", () => {
     createBindMountSandboxProvider({
       name: "test-interactive",
       create: async (options) => {
-        const handle: BindMountSandboxHandle = {
+        const handle: SandboxHandle = {
           worktreePath: options.worktreePath,
           exec: async (command) => {
             const result = execSync(command, {
@@ -65,8 +76,6 @@ describe("interactive()", () => {
             return { stdout: result, stderr: "", exitCode: 0 };
           },
           interactiveExec: fakeInteractiveExec,
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         };
         return handle;
@@ -160,8 +169,6 @@ describe("interactive()", () => {
           return { stdout: result, stderr: "", exitCode: 0 };
         },
         // No interactiveExec
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });

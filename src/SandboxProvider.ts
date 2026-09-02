@@ -20,9 +20,34 @@ export interface InteractiveExecOptions {
   readonly cwd?: string;
 }
 
-/** Handle to a running bind-mount sandbox. */
-export interface BindMountSandboxHandle {
-  /** Absolute path to the worktree inside the sandbox. */
+/**
+ * File transfer capability — present only on a `SandboxHandle` whose
+ * filesystem is independent of the host (an "isolated" provider), where code
+ * must be synced explicitly rather than being visible through a shared mount.
+ */
+export interface SandboxTransfer {
+  /** Copy a file or directory from the host into the sandbox. */
+  copyIn(hostPath: string, sandboxPath: string): Promise<void>;
+  /** Copy a single file from the sandbox to the host. */
+  copyFileOut(sandboxPath: string, hostPath: string): Promise<void>;
+}
+
+/**
+ * Handle to a running sandbox, regardless of provider category (bind-mount,
+ * isolated, or no-sandbox). Replaces the three previously-separate
+ * `BindMountSandboxHandle` / `IsolatedSandboxHandle` / `NoSandboxHandle`
+ * interfaces, which differed only in whether `transfer` was present and
+ * whether `interactiveExec` was required — properties now expressed as data
+ * (an optional field) rather than as three structurally-duplicated types.
+ *
+ * `interactiveExec` is optional here even though `noSandbox()`'s own handle
+ * always implements it (`interactive()`'s default provider genuinely
+ * requires it at runtime) — that per-category "always present" guarantee is
+ * deliberately not re-encoded at the type level for a custom `NoSandboxProvider`
+ * author; `interactive()` fails at the call site if it's missing.
+ */
+export interface SandboxHandle {
+  /** Absolute path to the worktree inside the sandbox (or on the host, for no-sandbox). */
   readonly worktreePath: string;
   /**
    * Execute a command in the sandbox.
@@ -55,10 +80,8 @@ export interface BindMountSandboxHandle {
     args: string[],
     options: InteractiveExecOptions,
   ): Promise<{ exitCode: number }>;
-  /** Copy a single file from the host into the sandbox. */
-  copyFileIn(hostPath: string, sandboxPath: string): Promise<void>;
-  /** Copy a single file from the sandbox to the host. */
-  copyFileOut(sandboxPath: string, hostPath: string): Promise<void>;
+  /** File transfer capability — present only for providers with an independent filesystem. */
+  readonly transfer?: SandboxTransfer;
   /** Tear down the sandbox. */
   close(): Promise<void>;
 }
@@ -91,53 +114,10 @@ export interface BindMountSandboxProviderConfig {
    * Set to `undefined` for providers that do not have a fixed home directory.
    */
   readonly sandboxHomedir?: string;
-  /** Create a sandbox handle from the given options. */
-  readonly create: (
-    options: BindMountCreateOptions,
-  ) => Promise<BindMountSandboxHandle>;
-}
-
-/** Handle to a running isolated sandbox (extends bind-mount with file transfer). */
-export interface IsolatedSandboxHandle {
-  /** Absolute path to the worktree inside the sandbox. */
-  readonly worktreePath: string;
-  /**
-   * Execute a command in the sandbox.
-   *
-   * Implementations MUST support line-by-line streaming via `onLine`. This is
-   * how Sandcastle delivers live feedback to the user and enforces idle timeouts —
-   * without a streaming implementation, neither will work. A buffered/batch
-   * implementation that only calls `onLine` after the process exits does NOT
-   * satisfy this contract.
-   *
-   * When `stdin` is set, the implementation pipes the string to the child
-   * process's stdin and closes it. This avoids the Linux 128 KB per-arg limit.
-   */
-  exec(
-    command: string,
-    options?: {
-      onLine?: (line: string) => void;
-      cwd?: string;
-      sudo?: boolean;
-      stdin?: string;
-    },
-  ): Promise<ExecResult>;
-  /**
-   * Launch an interactive process inside the sandbox.
-   * Optional — providers that support interactive sessions implement this.
-   * The provider detects TTY mode from the streams (e.g. stdin.isTTY) and
-   * allocates a pseudo-terminal accordingly.
-   */
-  interactiveExec?(
-    args: string[],
-    options: InteractiveExecOptions,
-  ): Promise<{ exitCode: number }>;
-  /** Copy a file or directory from the host into the sandbox. */
-  copyIn(hostPath: string, sandboxPath: string): Promise<void>;
-  /** Copy a single file from the sandbox to the host. */
-  copyFileOut(sandboxPath: string, hostPath: string): Promise<void>;
-  /** Tear down the sandbox. */
-  close(): Promise<void>;
+  /** Create a sandbox handle from the given options. `transfer` should be
+   *  omitted — bind-mount providers share the host filesystem via mount, so
+   *  nothing in Sandcastle ever calls it. */
+  readonly create: (options: BindMountCreateOptions) => Promise<SandboxHandle>;
 }
 
 /** Options passed to an isolated provider's `create` function. */
@@ -152,10 +132,10 @@ export interface IsolatedSandboxProviderConfig {
   readonly name: string;
   /** Environment variables injected by this provider. Merged at launch time. */
   readonly env?: Record<string, string>;
-  /** Create an isolated sandbox handle from the given options. */
-  readonly create: (
-    options: IsolatedCreateOptions,
-  ) => Promise<IsolatedSandboxHandle>;
+  /** Create a sandbox handle from the given options. `transfer` must be
+   *  implemented — isolated providers have their own filesystem, so code
+   *  only reaches the sandbox via `transfer.copyIn`/`copyFileOut`. */
+  readonly create: (options: IsolatedCreateOptions) => Promise<SandboxHandle>;
 }
 
 /** A bind-mount sandbox provider. */
@@ -171,10 +151,9 @@ export interface BindMountSandboxProvider {
    * `undefined` when the provider does not declare a sandbox home directory.
    */
   readonly sandboxHomedir: string | undefined;
-  /** @internal Create a sandbox handle. */
-  readonly create: (
-    options: BindMountCreateOptions,
-  ) => Promise<BindMountSandboxHandle>;
+  /** @internal Create a sandbox handle. `transfer` should be omitted — see
+   *  `BindMountSandboxProviderConfig.create`. */
+  readonly create: (options: BindMountCreateOptions) => Promise<SandboxHandle>;
 }
 
 /** An isolated sandbox provider. */
@@ -185,44 +164,9 @@ export interface IsolatedSandboxProvider {
   readonly name: string;
   /** Environment variables injected by this provider. */
   readonly env: Record<string, string>;
-  /** @internal Create an isolated sandbox handle. */
-  readonly create: (
-    options: IsolatedCreateOptions,
-  ) => Promise<IsolatedSandboxHandle>;
-}
-
-/** Handle to a no-sandbox session — runs commands directly on the host. */
-export interface NoSandboxHandle {
-  /** Absolute path to the worktree on the host. */
-  readonly worktreePath: string;
-  /**
-   * Execute a command on the host.
-   *
-   * Implementations MUST support line-by-line streaming via `onLine`. This is
-   * how Sandcastle delivers live feedback to the user and enforces idle timeouts —
-   * without a streaming implementation, neither will work.
-   *
-   * When `stdin` is set, the implementation pipes the string to the child
-   * process's stdin and closes it. This avoids the Linux 128 KB per-arg limit.
-   */
-  exec(
-    command: string,
-    options?: {
-      onLine?: (line: string) => void;
-      cwd?: string;
-      sudo?: boolean;
-      stdin?: string;
-    },
-  ): Promise<ExecResult>;
-  /**
-   * Launch an interactive process on the host with inherited stdio.
-   */
-  interactiveExec(
-    args: string[],
-    options: InteractiveExecOptions,
-  ): Promise<{ exitCode: number }>;
-  /** No-op — no container to tear down. */
-  close(): Promise<void>;
+  /** @internal Create a sandbox handle. `transfer` must be implemented — see
+   *  `IsolatedSandboxProviderConfig.create`. */
+  readonly create: (options: IsolatedCreateOptions) => Promise<SandboxHandle>;
 }
 
 /** A no-sandbox provider — runs the agent directly on the host with no container isolation. */
@@ -233,11 +177,13 @@ export interface NoSandboxProvider {
   readonly name: string;
   /** Environment variables injected by this provider. */
   readonly env: Record<string, string>;
-  /** @internal Create a no-sandbox handle. */
+  /** @internal Create a sandbox handle. `interactiveExec` must be
+   *  implemented — `interactive()`'s default provider genuinely requires it
+   *  at runtime; see the doc comment on `SandboxHandle.interactiveExec`. */
   readonly create: (options: {
     readonly worktreePath: string;
     readonly env: Record<string, string>;
-  }) => Promise<NoSandboxHandle>;
+  }) => Promise<SandboxHandle>;
 }
 
 // ---------- Branch strategy types ----------

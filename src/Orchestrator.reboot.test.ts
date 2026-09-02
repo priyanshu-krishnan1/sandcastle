@@ -34,7 +34,12 @@ const initRepo = async (dir: string) => {
   await execAsync('git config user.name "Test"', { cwd: dir });
 };
 
-const commitFile = async (dir: string, name: string, content: string, message: string) => {
+const commitFile = async (
+  dir: string,
+  name: string,
+  content: string,
+  message: string,
+) => {
   await writeFile(join(dir, name), content);
   await execAsync(`git add "${name}"`, { cwd: dir });
   await execAsync(`git commit -m "${message}"`, { cwd: dir });
@@ -53,7 +58,11 @@ const makeTestSandboxFactory = (
         info: import("./SandboxFactory.js").SandboxInfo,
         sandbox: SandboxService,
       ) => Effect.Effect<A, E, R>,
-    ): Effect.Effect<import("./SandboxFactory.js").WithSandboxResult<A>, E | DockerError, R> =>
+    ): Effect.Effect<
+      import("./SandboxFactory.js").WithSandboxResult<A>,
+      E | DockerError,
+      R
+    > =>
       Effect.acquireUseRelease(
         Effect.promise(async () => {
           await rm(sandboxBaseDir, { recursive: true, force: true });
@@ -75,12 +84,13 @@ const makeTestSandboxFactory = (
           ) as Effect.Effect<A, E | DockerError, R>,
         (_) =>
           Effect.promise(async () => {
-            await execAsync(
-              `git worktree remove "${sandboxBaseDir}" --force`,
-              { cwd: hostRepoDir },
-            ).catch(() => {});
+            await execAsync(`git worktree remove "${sandboxBaseDir}" --force`, {
+              cwd: hostRepoDir,
+            }).catch(() => {});
           }),
-      ).pipe(Effect.map((value) => ({ value, preservedWorktreePath: undefined }))),
+      ).pipe(
+        Effect.map((value) => ({ value, preservedWorktreePath: undefined })),
+      ),
   });
 };
 
@@ -96,12 +106,18 @@ describe("Orchestrator reboot completion", () => {
         exec: (command, options) => {
           if (command.includes("bob run") && options?.onLine) {
             // Agent emits the completion signal, then the connection drops (exit 255).
-            options.onLine(JSON.stringify({
-              type: "message",
-              role: "assistant",
-              content: "Rebooting now. <promise>COMPLETE</promise>",
-            }));
-            return Effect.succeed({ stdout: "", stderr: "Connection closed by remote host.", exitCode: 255 });
+            options.onLine(
+              JSON.stringify({
+                type: "message",
+                role: "assistant",
+                content: "Rebooting now. <promise>COMPLETE</promise>",
+              }),
+            );
+            return Effect.succeed({
+              stdout: "",
+              stderr: "Connection closed by remote host.",
+              exitCode: 255,
+            });
           }
           return real.exec(command, options);
         },
@@ -134,7 +150,11 @@ describe("Orchestrator reboot completion", () => {
         exec: (command, options) => {
           if (command.includes("bob run") && options?.onLine) {
             // Connection drops without any prior completion signal.
-            return Effect.succeed({ stdout: "", stderr: "Connection closed by remote host.", exitCode: 255 });
+            return Effect.succeed({
+              stdout: "",
+              stderr: "Connection closed by remote host.",
+              exitCode: 255,
+            });
           }
           return real.exec(command, options);
         },

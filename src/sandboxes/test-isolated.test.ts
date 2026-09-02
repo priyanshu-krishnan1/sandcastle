@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   writeFileSync,
   readFileSync,
 } from "node:fs";
@@ -45,7 +46,9 @@ describe("testIsolated()", () => {
     const handle = await provider.create({ env: {} });
     try {
       const result = await handle.exec("pwd", { cwd: "/tmp" });
-      expect(result.stdout.trim()).toBe("/tmp");
+      // realpathSync: `pwd`'s output is OS-resolved (e.g. macOS's
+      // /tmp -> /private/tmp), so the expected value must be too.
+      expect(result.stdout.trim()).toBe(realpathSync("/tmp"));
     } finally {
       await handle.close();
     }
@@ -73,7 +76,7 @@ describe("testIsolated()", () => {
 
       // Copy it into the sandbox
       const sandboxFile = join(handle.worktreePath, "input.txt");
-      await handle.copyIn(hostFile, sandboxFile);
+      await handle.transfer!.copyIn(hostFile, sandboxFile);
 
       // Verify it exists inside the sandbox
       const result = await handle.exec("cat input.txt");
@@ -94,7 +97,7 @@ describe("testIsolated()", () => {
       const hostDir = mkdtempSync(join(tmpdir(), "test-host-"));
       const hostFile = join(hostDir, "output.txt");
       const sandboxFile = join(handle.worktreePath, "output.txt");
-      await handle.copyFileOut(sandboxFile, hostFile);
+      await handle.transfer!.copyFileOut(sandboxFile, hostFile);
 
       // Verify it exists on the host
       const content = readFileSync(hostFile, "utf-8");
@@ -117,7 +120,7 @@ describe("testIsolated()", () => {
 
       // Copy directory into sandbox
       const sandboxDir = join(handle.worktreePath, "mydir");
-      await handle.copyIn(srcDir, sandboxDir);
+      await handle.transfer!.copyIn(srcDir, sandboxDir);
 
       // Verify both files exist
       const resultA = await handle.exec("cat mydir/a.txt");

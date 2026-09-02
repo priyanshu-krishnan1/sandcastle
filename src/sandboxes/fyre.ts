@@ -31,12 +31,12 @@ import {
   type ExecResult,
   type InteractiveExecOptions,
   type IsolatedCreateOptions,
-  type IsolatedSandboxHandle,
   type IsolatedSandboxProvider,
   type NoSandboxProvider,
-  type NoSandboxHandle,
+  type SandboxHandle,
 } from "../SandboxProvider.js";
 import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
+import { shellQuote } from "../shellQuote.js";
 
 export interface FyreOptions {
   /** SSH host alias or hostname. */
@@ -59,8 +59,6 @@ export interface FyreOptions {
    */
   readonly maxOutputTailChars?: number;
 }
-
-const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
 const buildSshTarget = (options: FyreOptions): string =>
   options.user ? `${options.user}@${options.host}` : options.host;
@@ -194,7 +192,11 @@ const copyFileToRemote = async (
   await new Promise<void>((resolve, reject) => {
     execFile(
       "scp",
-      [...buildScpBaseArgs(options), hostPath, `${buildSshTarget(options)}:${remotePath}`],
+      [
+        ...buildScpBaseArgs(options),
+        hostPath,
+        `${buildSshTarget(options)}:${remotePath}`,
+      ],
       (error) => {
         if (error) {
           reject(new Error(`scp copy to remote failed: ${error.message}`));
@@ -215,7 +217,11 @@ const copyFileFromRemote = async (
   await new Promise<void>((resolve, reject) => {
     execFile(
       "scp",
-      [...buildScpBaseArgs(options), `${buildSshTarget(options)}:${remotePath}`, hostPath],
+      [
+        ...buildScpBaseArgs(options),
+        `${buildSshTarget(options)}:${remotePath}`,
+        hostPath,
+      ],
       (error) => {
         if (error) {
           reject(new Error(`scp copy from remote failed: ${error.message}`));
@@ -292,13 +298,16 @@ export const fyre = (options: FyreOptions): IsolatedSandboxProvider =>
   createIsolatedSandboxProvider({
     name: "fyre",
     env: options.env,
-    create: async (createOptions: IsolatedCreateOptions): Promise<IsolatedSandboxHandle> => {
+    create: async (
+      createOptions: IsolatedCreateOptions,
+    ): Promise<SandboxHandle> => {
       // createOptions.env is the fully-merged env dict from:
       //   .sandcastle/.env  +  process.env  +  bob({ env:{} })  +  fyre({ env:{} })
       // We forward it into every remote command so the agent has its credentials.
       const sessionEnv = createOptions.env;
 
-      const remoteRoot = options.remoteRoot ?? `/tmp/sandcastle-${randomUUID()}`;
+      const remoteRoot =
+        options.remoteRoot ?? `/tmp/sandcastle-${randomUUID()}`;
       const worktreePath = posix.join(remoteRoot, "workspace");
       await remoteExec(
         options,
@@ -331,16 +340,21 @@ export const fyre = (options: FyreOptions): IsolatedSandboxProvider =>
             });
 
             proc.on("error", (error: Error) => {
-              reject(new Error(`ssh interactive exec failed: ${error.message}`));
+              reject(
+                new Error(`ssh interactive exec failed: ${error.message}`),
+              );
             });
             proc.on("close", (code: number | null) => {
               resolve({ exitCode: code ?? 0 });
             });
           });
         },
-        copyIn: (hostPath, sandboxPath) => copyInRecursive(options, hostPath, sandboxPath),
-        copyFileOut: async (sandboxPath, hostPath) => {
-          await copyFileFromRemote(options, sandboxPath, hostPath);
+        transfer: {
+          copyIn: (hostPath, sandboxPath) =>
+            copyInRecursive(options, hostPath, sandboxPath),
+          copyFileOut: async (sandboxPath, hostPath) => {
+            await copyFileFromRemote(options, sandboxPath, hostPath);
+          },
         },
         close: async () => {
           await remoteExec(options, `rm -rf ${shellQuote(remoteRoot)}`);
@@ -411,7 +425,7 @@ export const fyreNative = (options: FyreNativeOptions): NoSandboxProvider => ({
   name: "fyre-native",
   env: options.env ?? {},
 
-  create: async (createOptions): Promise<NoSandboxHandle> => {
+  create: async (createOptions): Promise<SandboxHandle> => {
     // Ignore the framework-supplied worktreePath (local temp dir) and use the
     // pre-existing remote path so all exec() calls land in the right place.
     const worktreePath = options.repoPath;
@@ -427,16 +441,26 @@ export const fyreNative = (options: FyreNativeOptions): NoSandboxProvider => ({
     const buildExportStatements = (env: Record<string, string>): string => {
       const entries = Object.entries(env);
       if (entries.length === 0) return "";
-      return entries.map(([k, v]) => `export ${k}=${shellQuote(v)}`).join("; ") + "; ";
+      return (
+        entries.map(([k, v]) => `export ${k}=${shellQuote(v)}`).join("; ") +
+        "; "
+      );
     };
 
     // Build a remote command string wrapped in the chosen shell so it runs
     // under bash regardless of the user's login shell.
     const buildNativeRemoteCommand = (
       command: string,
-      execOptions?: { cwd?: string; sudo?: boolean; env?: Record<string, string> },
+      execOptions?: {
+        cwd?: string;
+        sudo?: boolean;
+        env?: Record<string, string>;
+      },
     ): string => {
-      const exports = buildExportStatements({ ...sessionEnv, ...(execOptions?.env ?? {}) });
+      const exports = buildExportStatements({
+        ...sessionEnv,
+        ...(execOptions?.env ?? {}),
+      });
       const sudoPrefix = execOptions?.sudo ? "sudo " : "";
       const cwd = execOptions?.cwd ?? worktreePath;
       const inner = `cd ${shellQuote(cwd)}; ${exports}${sudoPrefix}${command}`;
@@ -480,17 +504,29 @@ export const fyreNative = (options: FyreNativeOptions): NoSandboxProvider => ({
               stderrTail.push(chunk.toString());
             });
             proc.on("close", (code) => {
-              resolve({ stdout: stdoutTail.toString(), stderr: stderrTail.toString(), exitCode: code ?? 0 });
+              resolve({
+                stdout: stdoutTail.toString(),
+                stderr: stderrTail.toString(),
+                exitCode: code ?? 0,
+              });
             });
             return;
           }
 
           const stdoutChunks: string[] = [];
           const stderrChunks: string[] = [];
-          proc.stdout!.on("data", (chunk: Buffer) => { stdoutChunks.push(chunk.toString()); });
-          proc.stderr!.on("data", (chunk: Buffer) => { stderrChunks.push(chunk.toString()); });
+          proc.stdout!.on("data", (chunk: Buffer) => {
+            stdoutChunks.push(chunk.toString());
+          });
+          proc.stderr!.on("data", (chunk: Buffer) => {
+            stderrChunks.push(chunk.toString());
+          });
           proc.on("close", (code) => {
-            resolve({ stdout: stdoutChunks.join(""), stderr: stderrChunks.join(""), exitCode: code ?? 0 });
+            resolve({
+              stdout: stdoutChunks.join(""),
+              stderr: stderrChunks.join(""),
+              exitCode: code ?? 0,
+            });
           });
         });
       },
@@ -505,7 +541,11 @@ export const fyreNative = (options: FyreNativeOptions): NoSandboxProvider => ({
           sshArgs.push(shell, "-c", shellQuote(inner));
 
           const proc = spawn("ssh", sshArgs, {
-            stdio: [execOptions.stdin, execOptions.stdout, execOptions.stderr] as StdioOptions,
+            stdio: [
+              execOptions.stdin,
+              execOptions.stdout,
+              execOptions.stderr,
+            ] as StdioOptions,
           });
 
           proc.on("error", (error: Error) => {

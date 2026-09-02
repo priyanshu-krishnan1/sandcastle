@@ -15,7 +15,7 @@ import type {
 import { bob } from "./AgentProvider.js";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type InteractiveExecOptions,
   type ExecResult,
   type SandboxProvider,
@@ -304,7 +304,7 @@ describe("worktree.interactive()", () => {
     createBindMountSandboxProvider({
       name: "test-interactive",
       create: async (options) => {
-        const handle: BindMountSandboxHandle = {
+        const handle: SandboxHandle = {
           worktreePath: options.worktreePath,
           exec: async (command) => {
             const result = execSync(command, {
@@ -315,8 +315,6 @@ describe("worktree.interactive()", () => {
             return { stdout: result, stderr: "", exitCode: 0 };
           },
           interactiveExec: fakeInteractiveExec,
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         };
         return handle;
@@ -571,7 +569,7 @@ describe("worktree.run()", () => {
     createBindMountSandboxProvider({
       name: "test-run",
       create: async (options) => {
-        const handle: BindMountSandboxHandle = {
+        const handle: SandboxHandle = {
           worktreePath: options.worktreePath,
           exec: async (
             command: string,
@@ -603,8 +601,6 @@ describe("worktree.run()", () => {
             });
             return { stdout: result, stderr: "", exitCode: 0 };
           },
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         };
         return handle;
@@ -640,7 +636,6 @@ describe("worktree.run()", () => {
       await rm(hostDir, { recursive: true, force: true });
     }
   });
-
 
   it("worktree persists after run completes", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "ws-run-"));
@@ -959,8 +954,6 @@ const testSandbox: SandboxProvider = createBindMountSandboxProvider({
   create: async (options) => ({
     worktreePath: options.worktreePath,
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-    copyFileIn: async () => {},
-    copyFileOut: async () => {},
     close: async () => {},
   }),
 });

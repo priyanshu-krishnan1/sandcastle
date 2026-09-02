@@ -593,7 +593,6 @@ export async function run(
   if (options.resumeSession) {
     await assertResumeSessionExists({
       provider,
-      sandboxTag: options.sandbox.tag,
       hostRepoDir,
       resumeSession: options.resumeSession,
     });
