@@ -109,3 +109,35 @@ test it against.
 - Remote-repo support and lighter-weight (no-worktree) lifecycles are not implemented.
   Building them is future work, to be designed against a concrete caller rather than
   spliced back in from this branch's removed code.
+
+## Addendum: the real caller showed up — `fyreNative()` and `nativeGitTarget`
+
+Shortly after the removal above, a concrete caller for "the repo isn't on the local
+filesystem" turned up in already-shipped code: `fyreNative()`
+(`src/sandboxes/fyre.ts`) runs the agent directly against a pre-existing repository on
+a remote Fyre host over SSH, tagged `"none"`. Tracing it revealed a genuine bug, not a
+hypothetical one: `withSandboxLifecycle`'s branch-strategy/merge/diff-collection step
+always ran through `LocalGitClient` against `hostRepoDir` — always the local machine's
+`cwd` — regardless of provider. For `fyreNative()`, that meant every git operation
+(`currentBranch`, `identity`, `mergeBranch`, `deleteBranch`, `revList`) ran against the
+wrong repository; the agent's actual changes live in `repoPath` on the remote host,
+reached only through the handle's own SSH `exec`. No test caught it.
+
+The fix was narrower than reviving `RemoteGitClient`/`RepoRef`: `NoSandboxProvider`
+gained a `nativeGitTarget` flag, and `withSandboxLifecycle` — when it's set — builds
+`GitClient` from the sandbox handle's own `exec` (the SSH channel the provider already
+established) instead of opening a second, independent one, and remaps
+`hostRepoDir`/`hostWorktreePath` to `sandboxRepoDir` so every downstream operation
+targets the real repo. This validates the design principle from the removal above:
+the right shape for "repo isn't local" came from tracing a real, already-broken call
+path, not from the earlier `RepoRef` union's guess at it — and turned out simpler
+(reuse the handle's existing channel) than what was removed (a second SSH config
+surface duplicating the provider's own).
+
+**Known gap, left open:** merge-to-head branch strategy assumes the host and the
+worktree are two independent checkouts of the same repo — "capture the host's current
+branch, then let the worktree switch to a temp branch" — a trick that doesn't work when
+there's only one physical checkout (`nativeGitTarget`'s case). Named-branch and head
+strategies are unaffected and work correctly today; merge-to-head for a
+`nativeGitTarget` provider needs its own design (who creates the temp branch, and
+when) before it can be supported.
