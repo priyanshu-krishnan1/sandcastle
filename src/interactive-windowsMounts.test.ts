@@ -42,7 +42,7 @@ import {
   type SandboxHandle,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 
 /** A bind-mount provider whose handle executes commands on the host worktree. */
 const makeInteractiveProvider = () =>

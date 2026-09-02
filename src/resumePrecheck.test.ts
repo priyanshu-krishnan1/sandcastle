@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import type { AgentProvider, AgentSessionStorage } from "./AgentProvider.js";
 import { assertResumeSessionExists } from "./resumePrecheck.js";
 

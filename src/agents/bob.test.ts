@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { bob } from "./AgentProvider.js";
-import type { AgentCommandOptions } from "./AgentProvider.js";
+import { bob } from "./bob.js";
+import type { AgentCommandOptions } from "../AgentProvider.js";
 
 /** Shorthand: build options with dangerouslySkipPermissions: true (mirrors existing sandbox callers). */
 const opts = (prompt: string): AgentCommandOptions => ({

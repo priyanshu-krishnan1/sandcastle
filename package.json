@@ -17,6 +17,10 @@
     "./sandboxes/no-sandbox": {
       "import": "./dist/sandboxes/no-sandbox.js",
       "types": "./dist/sandboxes/no-sandbox.d.ts"
+    },
+    "./agents/bob": {
+      "import": "./dist/agents/bob.js",
+      "types": "./dist/agents/bob.d.ts"
     }
   },
   "bin": {

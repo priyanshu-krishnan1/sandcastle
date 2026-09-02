@@ -19,7 +19,7 @@ import {
   type SandboxHandle,
   type InteractiveExecOptions,
 } from "./SandboxProvider.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 
 describe("interactive arg collection", () => {
   let hostDir: string;

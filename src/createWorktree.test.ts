@@ -12,7 +12,7 @@ import type {
   WorktreeInteractiveOptions,
   WorktreeCreateSandboxOptions,
 } from "./createWorktree.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import {
   createBindMountSandboxProvider,
   type SandboxHandle,

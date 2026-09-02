@@ -43,12 +43,12 @@ export type {
   OutputStringDefinition,
 } from "./Output.js";
 export { CwdError } from "./CwdError.js";
-export { bob } from "./AgentProvider.js";
+export { bob } from "./agents/bob.js";
+export type { BobOptions } from "./agents/bob.js";
 export type {
   AgentProvider,
   AgentCommandOptions,
   PrintCommand,
-  BobOptions,
 } from "./AgentProvider.js";
 export { fyreNative } from "./sandboxes/fyre.js";
 export type { FyreOptions, FyreNativeOptions } from "./sandboxes/fyre.js";

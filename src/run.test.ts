@@ -22,7 +22,7 @@ import {
   type RunOptions,
   type RunResult,
 } from "./run.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import { Output, StructuredOutputError } from "./Output.js";
 import type { InteractiveOptions } from "./interactive.js";
 import type { WorktreeInteractiveOptions } from "./createWorktree.js";

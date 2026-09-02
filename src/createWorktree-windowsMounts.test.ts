@@ -43,7 +43,7 @@ import {
   type ExecResult,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 
 /** Format a minimal stream-json response so the orchestrator parses agent output. */
 const toStreamJson = (output: string): string => {

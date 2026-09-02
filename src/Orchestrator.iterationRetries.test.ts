@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import { orchestrate } from "./Orchestrator.js";
 import { AgentError } from "./errors.js";
 import type { SandboxService } from "./SandboxFactory.js";

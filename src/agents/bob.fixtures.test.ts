@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { bob } from "./AgentProvider.js";
-import type { ParsedStreamEvent } from "./AgentProvider.js";
+import { bob } from "./bob.js";
+import type { ParsedStreamEvent } from "../AgentProvider.js";
 
 /**
  * Fixture-based end-to-end regression coverage for the bob() Bob-Shell 2.0
  * `parseStreamLine` implementation.
  *
- * The unit tests in AgentProvider.test.ts check "does event X map to Y" in
+ * The unit tests in bob.test.ts check "does event X map to Y" in
  * isolation, one line at a time. That style of test cannot catch a bug that
  * only shows up when a *sequence* of realistic events is replayed through the
  * full pipeline — e.g. whether a tool call whose `parameters`/`output` happen
@@ -174,7 +174,7 @@ const transcriptGenuineCompletion: string[] = [
 // Fixture 3: error path mid-stream — a failed tool_result followed by a
 // terminal {"type":"result","status":"error"} event. Neither may ever surface
 // as a bare {type:"text"} event (both route through tool_call), per the
-// design already implemented in AgentProvider.ts.
+// design already implemented in bob.ts.
 // ---------------------------------------------------------------------------
 
 const transcriptMidStreamError: string[] = [

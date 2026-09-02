@@ -25,7 +25,7 @@ Before implementing, confirm the agent's CLI satisfies the must-haves below. If 
 ### Must-have output capabilities
 
 - **Streaming output.** The CLI must stream output to stdout as the agent runs; we surface it live in [`Display`](../../src/Display.ts).
-- **Structured (JSON) stream events.** Required — line-delimited JSON (one event per line). This is what `parseStreamLine` in [`AgentProvider.ts`](../../src/AgentProvider.ts) consumes; without it, tool calls and partial text cannot render in the UI.
+- **Structured (JSON) stream events.** Required — line-delimited JSON (one event per line). This is what your provider's `parseStreamLine` implementation (the interface method is declared in [`AgentProvider.ts`](../../src/AgentProvider.ts); see `src/agents/bob.ts` for a worked example) consumes; without it, tool calls and partial text cannot render in the UI.
 
 For a JSON stream, we want to extract:
 
@@ -133,7 +133,7 @@ Before writing code, **verify session-ID round-trip stability empirically**: run
 
 ### Patterns to follow
 
-- **Shell-escape every interpolated value** in `buildPrintCommand` using the `shellEscape` helper at the top of `AgentProvider.ts`.
+- **Shell-escape every interpolated value** in `buildPrintCommand` using the `shellQuote` helper in [`src/shellQuote.ts`](../../src/shellQuote.ts).
 - **Prefer stdin for the prompt** to dodge the argv size limit.
 - **Be defensive when parsing JSON.** Wrap `JSON.parse` in try/catch and tolerate unknown event types — CLIs add fields over time.
 - **Surface errors as `result` events** when the CLI emits them on stdout (see Codex/Pi). The Orchestrator's stderr-empty fallback uses these to show the user something useful.
@@ -158,16 +158,20 @@ And a Dockerfile constant alongside the existing ones. Use `CLAUDE_CODE_DOCKERFI
 
 ## Implementation checklist
 
-For a new agent provider `foo`:
+For a new agent provider `foo`, follow the layout `src/agents/bob.ts` already
+established: the shared `AgentProvider` interface stays in
+`src/AgentProvider.ts`, but each concrete provider gets its own module under
+`src/agents/`, mirroring how sandbox providers each live in their own file
+under `src/sandboxes/` (e.g. `src/sandboxes/fyre.ts`).
 
 - [ ] Verify session-ID round-trip stability empirically (see [Resume support](#resume-support-required)).
-- [ ] Factory `foo()` in [`src/AgentProvider.ts`](../../src/AgentProvider.ts), with options interface `FooOptions` (including `captureSessions?: boolean`).
+- [ ] Factory `foo()` in `src/agents/foo.ts`, with options interface `FooOptions` (including `captureSessions?: boolean`).
 - [ ] Stream-parsing helper `parseFooStreamLine` that emits `session_id` events alongside `text` / `result` / `tool_call`.
 - [ ] `sessionStorage` sub-object on the factory's return value, implementing `captureToHost`, `resumeIntoSandbox`, `readHostSession`, `existsOnHost`, `hostSessionFilePath`, and `findByIdOnHost` for `foo`'s on-disk layout.
 - [ ] `buildPrintCommand` honours `resumeSession` by appending `foo`'s native resume CLI flag.
-- [ ] Tests in `src/AgentProvider.test.ts` covering `buildPrintCommand` (both fresh and resume forms), `buildInteractiveArgs`, and stream parsing — including session-ID extraction and error events on stdout if applicable.
+- [ ] Tests in `src/agents/foo.test.ts` covering `buildPrintCommand` (both fresh and resume forms), `buildInteractiveArgs`, and stream parsing — including session-ID extraction and error events on stdout if applicable.
 - [ ] Tests covering `sessionStorage` round-trip: capture host↔sandbox, content preserved (and rewritten correctly if `foo`'s format requires it).
-- [ ] Public export from [`src/index.ts`](../../src/index.ts): the `foo` factory and the `FooOptions` type.
+- [ ] Public export from [`src/index.ts`](../../src/index.ts): re-export the `foo` factory and the `FooOptions` type from `src/agents/foo.ts` (mirroring how `fyre`/`fyreNative` are re-exported from `src/sandboxes/fyre.ts`), plus a matching `"./agents/foo"` subpath in `package.json`'s `exports` and `tsup.config.ts`'s `entry`.
 - [ ] `AGENT_REGISTRY` entry in [`src/InitService.ts`](../../src/InitService.ts).
 - [ ] `FOO_DOCKERFILE` constant in `src/InitService.ts`.
 - [ ] Changeset in `.changeset/` (patch, since pre-1.0). See [`CLAUDE.md`](../../CLAUDE.md).
