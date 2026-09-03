@@ -26,7 +26,7 @@ import {
 import { noSandbox } from "./sandboxes/no-sandbox.js";
 import { raceAbortSignal } from "./raceAbortSignal.js";
 import { resolveCwd } from "./resolveCwd.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 
 export interface InteractiveOptions {
   /** Agent provider to use (e.g. bob("default")) */

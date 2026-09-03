@@ -22,25 +22,23 @@ import {
 } from "./PromptArgumentSubstitution.js";
 import { resolvePrompt } from "./PromptResolver.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
-import type { LoggingOption, Timeouts } from "./run.js";
+import type { LoggingOption, Timeouts } from "./RunConfig.js";
 import {
   buildAgentStreamHandler,
   buildCompletionMessage,
   buildContextWindowLines,
   buildLogFilename,
   printFileDisplayStartup,
-} from "./run.js";
+} from "./RunDisplay.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
   type SandboxHooks,
 } from "./SandboxLifecycle.js";
-import { WorktreeError } from "./errors.js";
 import {
   type SandboxService,
   SandboxFactory,
-  SANDBOX_REPO_DIR,
-  resolveGitMounts,
+  resolveAndPatchGitMounts,
   makeSandboxFromHandle,
   printWorktreePreservedMessage,
 } from "./SandboxFactory.js";
@@ -56,7 +54,7 @@ import { syncOut } from "./syncOut.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 import { copyToWorktree } from "./CopyToWorktree.js";
 import { resolveCwd } from "./resolveCwd.js";
-import { patchGitMountsForWindows } from "./mountUtils.js";
+import { SANDBOX_REPO_DIR } from "./mountUtils.js";
 import { assertResumeSessionExists } from "./resumePrecheck.js";
 import { registerShutdown } from "./shutdownRegistry.js";
 
@@ -809,22 +807,14 @@ export const createSandboxFromWorktree = async (
         worktreeOrRepoPath: worktreePath,
       });
     } else {
-      startEffect = resolveGitMounts(join(hostRepoDir, ".git")).pipe(
+      // A failure to resolve git mounts must fail the sandbox start, not
+      // silently start it with no git mounts at all (which was this file's
+      // prior behavior — Effect.catchAll(() => Effect.succeed([]))). Uses
+      // the same resolveAndPatchGitMounts SandboxFactory.ts's
+      // startSandboxAgainstTarget uses, rather than a second independent
+      // copy of that resolve-then-patch sequence.
+      startEffect = resolveAndPatchGitMounts(hostRepoDir, worktreePath).pipe(
         Effect.provide(NodeFileSystem.layer),
-        // Matches SandboxFactory.ts's resolveAndPatchGitMounts: a failure to
-        // resolve git mounts must fail the sandbox start, not silently start
-        // it with no git mounts at all (which was this file's prior
-        // behavior — Effect.catchAll(() => Effect.succeed([]))).
-        Effect.mapError(
-          (e) =>
-            new WorktreeError({
-              message: `Failed to resolve git mounts: ${e}`,
-            }),
-        ),
-        // Patch git mounts for Windows worktree compatibility (ADR-0006)
-        Effect.flatMap((gitMounts) =>
-          patchGitMountsForWindows(gitMounts, worktreePath, SANDBOX_REPO_DIR),
-        ),
         Effect.flatMap((gitMounts) =>
           startSandbox({
             provider,
@@ -1010,23 +1000,8 @@ export const createSandbox = async (
                     env,
                     worktreeOrRepoPath: worktreePath,
                   })
-                : resolveGitMounts(join(hostRepoDir, ".git")).pipe(
+                : resolveAndPatchGitMounts(hostRepoDir, worktreePath).pipe(
                     Effect.provide(NodeFileSystem.layer),
-                    // See the matching comment in createSandboxFromWorktree above.
-                    Effect.mapError(
-                      (e) =>
-                        new WorktreeError({
-                          message: `Failed to resolve git mounts: ${e}`,
-                        }),
-                    ),
-                    // Patch git mounts for Windows worktree compatibility (ADR-0006)
-                    Effect.flatMap((gitMounts) =>
-                      patchGitMountsForWindows(
-                        gitMounts,
-                        worktreePath,
-                        SANDBOX_REPO_DIR,
-                      ),
-                    ),
                     Effect.flatMap((gitMounts) =>
                       startSandbox({
                         provider,

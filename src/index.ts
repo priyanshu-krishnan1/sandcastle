@@ -3,11 +3,10 @@ export { fyre } from "./sandboxes/fyre.js";
 export type {
   RunOptions,
   RunResult,
-  LoggingOption,
   IterationResult,
   IterationUsage,
-  Timeouts,
 } from "./run.js";
+export type { LoggingOption, Timeouts } from "./RunConfig.js";
 export { interactive } from "./interactive.js";
 export type { InteractiveOptions, InteractiveResult } from "./interactive.js";
 export { createSandbox } from "./createSandbox.js";

@@ -8,6 +8,7 @@ import {
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { run, type RunOptions, type RunResult } from "./run.js";
 import {
   buildCompletionMessage,
   buildContextWindowLines,
@@ -17,11 +18,8 @@ import {
   DEFAULT_MAX_ITERATIONS,
   formatContextWindowSize,
   printFileDisplayStartup,
-  run,
   sanitizeBranchForFilename,
-  type RunOptions,
-  type RunResult,
-} from "./run.js";
+} from "./RunDisplay.js";
 import { bob } from "./agents/bob.js";
 import { Output, StructuredOutputError } from "./Output.js";
 import type { InteractiveOptions } from "./interactive.js";

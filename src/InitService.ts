@@ -2,7 +2,7 @@ import { FileSystem } from "@effect/platform";
 import { Effect } from "effect";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
+import { SANDBOX_REPO_DIR } from "./mountUtils.js";
 
 const GITIGNORE = `.env
 logs/

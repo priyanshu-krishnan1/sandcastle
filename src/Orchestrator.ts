@@ -9,10 +9,11 @@ import {
 } from "./errors.js";
 import type { SandboxError } from "./errors.js";
 import type { SandboxService } from "./SandboxFactory.js";
-import { SandboxFactory, SANDBOX_REPO_DIR } from "./SandboxFactory.js";
+import { SandboxFactory } from "./SandboxFactory.js";
+import { SANDBOX_REPO_DIR } from "./mountUtils.js";
 import { withSandboxLifecycle, type SandboxHooks } from "./SandboxLifecycle.js";
 import type { AgentProvider, IterationUsage } from "./AgentProvider.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 import { TextDeltaBuffer } from "./TextDeltaBuffer.js";
 
 export type { ParsedStreamEvent, IterationUsage } from "./AgentProvider.js";

@@ -14,7 +14,7 @@ import {
 } from "./errors.js";
 import { GitClient, LocalGitClient, makeGitClient } from "./GitClient.js";
 import { type ExecResult, type SandboxService } from "./SandboxFactory.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 import { countCommitsToSync } from "./syncOut.js";
 
 const GIT_SETUP_TIMEOUT_MS = 10_000;

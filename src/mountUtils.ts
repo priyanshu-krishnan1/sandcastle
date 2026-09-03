@@ -11,7 +11,6 @@ import { isAbsolute, resolve, join, dirname } from "node:path";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import type { MountConfig } from "./MountConfig.js";
-import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { WorktreeError } from "./errors.js";
 
 /**
@@ -28,6 +27,9 @@ export type SelinuxLabel = "z" | "Z" | false;
  * directory when the workspace is a git worktree. See ADR-0006.
  */
 export const PARENT_GIT_SANDBOX_DIR = "/.sandcastle-parent-git";
+
+/** The mount point inside the sandbox where the project worktree is bound. */
+export const SANDBOX_REPO_DIR = "/home/agent/workspace";
 
 /**
  * Derive the default image name from the repo directory.

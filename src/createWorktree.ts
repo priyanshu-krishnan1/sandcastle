@@ -30,8 +30,8 @@ import {
   buildContextWindowLines,
   buildLogFilename,
   printFileDisplayStartup,
-} from "./run.js";
-import type { LoggingOption } from "./run.js";
+} from "./RunDisplay.js";
+import type { LoggingOption } from "./RunConfig.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
 import { agentStreamEmitterLayer } from "./AgentStreamEmitter.js";
 import { resolveEnv } from "./EnvResolver.js";
@@ -49,7 +49,7 @@ import {
 } from "./PromptArgumentSubstitution.js";
 import { noSandbox } from "./sandboxes/no-sandbox.js";
 import { raceAbortSignal } from "./raceAbortSignal.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 
 /** Branch strategies valid for createWorktree — head is excluded. */
 export type WorktreeBranchStrategy =

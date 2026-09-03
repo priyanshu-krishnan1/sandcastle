@@ -22,10 +22,9 @@ import {
   type SandboxService,
   type MountEntry,
   makeSandboxFromHandle,
-  SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
 import { syncIn } from "./syncIn.js";
-import { normalizeMounts } from "./mountUtils.js";
+import { normalizeMounts, SANDBOX_REPO_DIR } from "./mountUtils.js";
 
 export interface StartSandboxBindMountOptions {
   provider: BindMountSandboxProvider;

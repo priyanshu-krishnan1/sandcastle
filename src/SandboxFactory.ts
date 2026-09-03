@@ -1,6 +1,6 @@
 import { Context, Effect, Exit, Layer } from "effect";
 import { FileSystem } from "@effect/platform";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { PlatformError } from "@effect/platform/Error";
 import {
   AgentError,
@@ -12,7 +12,7 @@ import {
   type DockerError,
   type SandboxError,
 } from "./errors.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 import { copyToWorktree } from "./CopyToWorktree.js";
 import { Display } from "./Display.js";
@@ -24,7 +24,11 @@ import type {
 import { runHostHooks, type SandboxHooks } from "./SandboxLifecycle.js";
 import { startSandbox } from "./startSandbox.js";
 import { syncOut } from "./syncOut.js";
-import { patchGitMountsForWindows } from "./mountUtils.js";
+import {
+  patchGitMountsForWindows,
+  parseGitdirPath,
+  SANDBOX_REPO_DIR,
+} from "./mountUtils.js";
 
 /**
  * Exhaustiveness check for a `switch` over a closed union — calling this in
@@ -114,8 +118,11 @@ export const makeSandboxFromHandle = (
         ),
 });
 
-/** The mount point inside the sandbox where the project worktree is bound. */
-export const SANDBOX_REPO_DIR = "/home/agent/workspace";
+// `SANDBOX_REPO_DIR` is defined in `./mountUtils.js` — a low-level, leaf
+// utility module — so that module doesn't have to import this much larger
+// orchestration file just for the constant. Re-exported here since this is
+// where most callers have historically imported it from.
+export { SANDBOX_REPO_DIR };
 
 export interface SandboxInfo {
   /** Host-side path to the worktree directory (worktree/branch mode only). */
@@ -274,14 +281,43 @@ export const resolveGitMounts = (
       return [{ hostPath: gitPath, sandboxPath: gitPath }];
     }
     const gitdirPath = match[1]!;
-    // gitdirPath is like /path/to/repo/.git/worktrees/<name>
-    // Mount both the .git file and the parent .git directory
-    const parentGitDir = resolve(gitdirPath, "..", "..");
+    // gitdirPath is like /path/to/repo/.git/worktrees/<name> — reuse
+    // parseGitdirPath (mountUtils.ts) rather than re-deriving parentGitDir
+    // here, so there's one platform-aware (handles both `/` and `\`)
+    // implementation of this parsing instead of two that can drift.
+    const { parentGitDir } = parseGitdirPath(gitdirPath);
     return [
       { hostPath: gitPath, sandboxPath: gitPath },
       { hostPath: parentGitDir, sandboxPath: parentGitDir },
     ];
   });
+
+/**
+ * Resolve `hostRepoDir`'s git mounts and patch them for Windows worktree
+ * compatibility (ADR-0006) against `targetPath`. The bind-mount-provider
+ * setup step shared by `startSandboxAgainstTarget` (below) and
+ * `createSandbox.ts`'s `createSandboxFromWorktree`, which can't itself call
+ * `startSandboxAgainstTarget` (see the comment at its call site) but
+ * performed this exact sequence independently before this extraction.
+ * Leaves `FileSystem.FileSystem` in the requirement channel rather than
+ * providing it, so each call site keeps satisfying it its own way (ambient
+ * `Effect.gen` context vs. an explicit `Effect.provide`).
+ */
+export const resolveAndPatchGitMounts = (
+  hostRepoDir: string,
+  targetPath: string,
+): Effect.Effect<MountEntry[], WorktreeError, FileSystem.FileSystem> =>
+  resolveGitMounts(join(hostRepoDir, ".git")).pipe(
+    Effect.mapError(
+      (e) =>
+        new WorktreeError({
+          message: `Failed to resolve git mounts: ${e}`,
+        }),
+    ),
+    Effect.flatMap((gitMounts) =>
+      patchGitMountsForWindows(gitMounts, targetPath, SANDBOX_REPO_DIR),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // acquireSandbox / releaseSandbox — the setup/teardown primitives underneath
@@ -362,25 +398,7 @@ export const startSandboxAgainstTarget = (
       signal,
       timeouts,
     } = options;
-    const fileSystem = yield* FileSystem.FileSystem;
     const display = yield* Display;
-
-    const resolveAndPatchGitMounts = (): Effect.Effect<
-      MountEntry[],
-      WorktreeError
-    > =>
-      resolveGitMounts(join(hostRepoDir, ".git")).pipe(
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.mapError(
-          (e) =>
-            new WorktreeError({
-              message: `Failed to resolve git mounts: ${e}`,
-            }),
-        ),
-        Effect.flatMap((gitMounts) =>
-          patchGitMountsForWindows(gitMounts, targetPath, SANDBOX_REPO_DIR),
-        ),
-      );
 
     const runOnWorktreeReady = () =>
       hooks?.host?.onWorktreeReady?.length
@@ -462,7 +480,10 @@ export const startSandboxAgainstTarget = (
       case "bind-mount": {
         yield* runCopyToWorktree();
         yield* runOnWorktreeReady();
-        const gitMounts = yield* resolveAndPatchGitMounts();
+        const gitMounts = yield* resolveAndPatchGitMounts(
+          hostRepoDir,
+          targetPath,
+        );
         const { sandbox, worktreePath, handle } = yield* startSandbox({
           provider: sandboxProvider,
           hostRepoDir,
