@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { bob } from "./AgentProvider.js";
-import type { ParsedStreamEvent } from "./AgentProvider.js";
+import { bob } from "./bob.js";
+import type { ParsedStreamEvent } from "../AgentProvider.js";
 
 /**
  * Fixture-based end-to-end regression coverage for the bob() Bob-Shell 2.0
  * `parseStreamLine` implementation.
  *
- * The unit tests in AgentProvider.test.ts check "does event X map to Y" in
+ * The unit tests in bob.test.ts check "does event X map to Y" in
  * isolation, one line at a time. That style of test cannot catch a bug that
  * only shows up when a *sequence* of realistic events is replayed through the
  * full pipeline — e.g. whether a tool call whose `parameters`/`output` happen
@@ -18,11 +18,11 @@ import type { ParsedStreamEvent } from "./AgentProvider.js";
  * JSON lines) through the REAL, imported `bob("default").parseStreamLine`
  * (never reimplemented) and mirrors — not reimplements the intent of, but
  * copies verbatim — the exact accumulation logic from Orchestrator.ts's
- * `invokeAgent` (see src/Orchestrator.ts lines ~175-189 and ~193-196):
+ * `invokeAgent` (see src/Orchestrator.ts's onLine handler):
  *
  *   for (const parsed of provider.parseStreamLine(line)) {
  *     if (parsed.type === "text") {
- *       accumulatedOutput += parsed.text;
+ *       if (parsed.assertive !== false) accumulatedOutput += parsed.text;
  *     } else if (parsed.type === "result") {
  *       accumulatedOutput += parsed.result;
  *     }
@@ -49,7 +49,9 @@ const replayTranscript = (
     for (const parsed of provider.parseStreamLine(line)) {
       allEvents.push(parsed);
       if (parsed.type === "text") {
-        accumulatedOutput += parsed.text;
+        if (parsed.assertive !== false) {
+          accumulatedOutput += parsed.text;
+        }
       } else if (parsed.type === "result") {
         accumulatedOutput += parsed.result;
       }
@@ -67,7 +69,9 @@ const replayTranscript = (
 // ---------------------------------------------------------------------------
 
 const transcriptSignalOnlyInToolCalls: string[] = [
-  // Reasoning commentary — dropped entirely, never reaches accumulatedOutput.
+  // Reasoning commentary — surfaced as non-assertive text, never reaches
+  // accumulatedOutput (see fixture 4 below for the case where this content
+  // itself contains the literal signal).
   JSON.stringify({
     type: "message",
     role: "assistant",
@@ -131,6 +135,8 @@ const transcriptSignalOnlyInToolCalls: string[] = [
 // ---------------------------------------------------------------------------
 
 const transcriptGenuineCompletion: string[] = [
+  // Reasoning commentary — surfaced as non-assertive text (see fixture 4),
+  // must not itself be mistaken for the genuine completion below.
   JSON.stringify({
     type: "message",
     role: "assistant",
@@ -152,12 +158,14 @@ const transcriptGenuineCompletion: string[] = [
   JSON.stringify({
     type: "message",
     role: "assistant",
-    content: "All tests pass and the feature is fully implemented. <promise>COMPLETE</promise>",
+    content:
+      "All tests pass and the feature is fully implemented. <promise>COMPLETE</promise>",
   }),
   JSON.stringify({
     type: "result",
     status: "success",
-    last_message: "All tests pass and the feature is fully implemented. <promise>COMPLETE</promise>",
+    last_message:
+      "All tests pass and the feature is fully implemented. <promise>COMPLETE</promise>",
     stats: { turns: 6, input_tokens: 500, output_tokens: 300 },
   }),
 ];
@@ -166,7 +174,7 @@ const transcriptGenuineCompletion: string[] = [
 // Fixture 3: error path mid-stream — a failed tool_result followed by a
 // terminal {"type":"result","status":"error"} event. Neither may ever surface
 // as a bare {type:"text"} event (both route through tool_call), per the
-// design already implemented in AgentProvider.ts.
+// design already implemented in bob.ts.
 // ---------------------------------------------------------------------------
 
 const transcriptMidStreamError: string[] = [
@@ -191,6 +199,42 @@ const transcriptMidStreamError: string[] = [
     type: "result",
     status: "error",
     error: "bob crashed while executing the plan",
+  }),
+];
+
+// ---------------------------------------------------------------------------
+// Fixture 4: the completion signal appears ONLY inside reasoning commentary
+// (isReasoning: true) — the exact scenario `assertive: false` exists for.
+// The reasoning event must still be visible in allEvents as text (so the
+// user sees it), but must never reach accumulatedOutput.
+// ---------------------------------------------------------------------------
+
+const transcriptSignalOnlyInReasoning: string[] = [
+  JSON.stringify({
+    type: "message",
+    role: "assistant",
+    isReasoning: true,
+    content:
+      "Once everything passes I'll emit <promise>COMPLETE</promise> to finish up.",
+  }),
+  JSON.stringify({
+    type: "tool_use",
+    tool_name: "Bash",
+    tool_id: "t1",
+    parameters: { command: "npm test" },
+  }),
+  JSON.stringify({
+    type: "tool_result",
+    tool_id: "t1",
+    status: "success",
+    output: "3 passed, 1 failed",
+  }),
+  // Genuine final assistant message — deliberately does NOT contain the
+  // signal, since the task isn't actually done yet (one test still fails).
+  JSON.stringify({
+    type: "message",
+    role: "assistant",
+    content: "One test is still failing — investigating before I finish.",
   }),
 ];
 
@@ -233,11 +277,32 @@ describe("bob() Bob-Shell 2.0 fixture-based regression coverage (full-pipeline r
 
     // No event derived from either error carries its message as bare text.
     const textEvents = allEvents.filter(
-      (e): e is Extract<ParsedStreamEvent, { type: "text" }> => e.type === "text",
+      (e): e is Extract<ParsedStreamEvent, { type: "text" }> =>
+        e.type === "text",
     );
     for (const e of textEvents) {
       expect(e.text).not.toContain("command not found");
       expect(e.text).not.toContain("bob crashed");
     }
+  });
+
+  it("never leaks a completion signal embedded only inside reasoning commentary into accumulatedOutput, while still surfacing it as visible text", () => {
+    const provider = bob("default");
+    const { accumulatedOutput, allEvents } = replayTranscript(
+      provider,
+      transcriptSignalOnlyInReasoning,
+    );
+
+    // The false-positive this fixture guards against: the signal must never
+    // reach the completion-signal-eligible buffer.
+    expect(accumulatedOutput).not.toContain(COMPLETION_SIGNAL);
+
+    // But the reasoning content must still be visible to the user — dropped
+    // entirely would be a regression to the pre-`assertive` behavior.
+    expect(allEvents).toContainEqual({
+      type: "text",
+      text: "Once everything passes I'll emit <promise>COMPLETE</promise> to finish up.",
+      assertive: false,
+    });
   });
 });

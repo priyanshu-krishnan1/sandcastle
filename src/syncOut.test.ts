@@ -5,11 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeSandboxFromHandle } from "./SandboxFactory.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 import { syncIn } from "./syncIn.js";
 import { countCommitsToSync, syncOut } from "./syncOut.js";
+
+// Every test here spawns several real git subprocesses (format-patch, am,
+// apply); under full-suite parallel load that can exceed vitest's 5s default,
+// same class of flake fixed for Orchestrator*.test.ts elsewhere in this repo.
+vi.setConfig({ testTimeout: 30000 });
 
 const execAsync = promisify(exec);
 

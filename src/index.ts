@@ -3,11 +3,10 @@ export { fyre } from "./sandboxes/fyre.js";
 export type {
   RunOptions,
   RunResult,
-  LoggingOption,
   IterationResult,
   IterationUsage,
-  Timeouts,
 } from "./run.js";
+export type { LoggingOption, Timeouts } from "./RunConfig.js";
 export { interactive } from "./interactive.js";
 export type { InteractiveOptions, InteractiveResult } from "./interactive.js";
 export { createSandbox } from "./createSandbox.js";
@@ -43,12 +42,12 @@ export type {
   OutputStringDefinition,
 } from "./Output.js";
 export { CwdError } from "./CwdError.js";
-export { bob } from "./AgentProvider.js";
+export { bob } from "./agents/bob.js";
+export type { BobOptions } from "./agents/bob.js";
 export type {
   AgentProvider,
   AgentCommandOptions,
   PrintCommand,
-  BobOptions,
 } from "./AgentProvider.js";
 export { fyreNative } from "./sandboxes/fyre.js";
 export type { FyreOptions, FyreNativeOptions } from "./sandboxes/fyre.js";
@@ -62,9 +61,7 @@ export type {
   BindMountSandboxProvider,
   IsolatedSandboxProvider,
   NoSandboxProvider,
-  BindMountSandboxHandle,
-  IsolatedSandboxHandle,
-  NoSandboxHandle,
+  SandboxHandle,
   InteractiveExecOptions,
   ExecResult,
   BindMountCreateOptions,

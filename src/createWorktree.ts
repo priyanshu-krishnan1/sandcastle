@@ -7,11 +7,9 @@ import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { resolvePrompt } from "./PromptResolver.js";
 import {
   SandboxFactory,
-  makeSandboxFromHandle,
-  resolveGitMounts,
-  SANDBOX_REPO_DIR,
+  startSandboxAgainstTarget,
+  printWorktreePreservedMessage,
 } from "./SandboxFactory.js";
-import { patchGitMountsForWindows } from "./mountUtils.js";
 import {
   withSandboxLifecycle,
   runHostHooks,
@@ -22,9 +20,6 @@ import type {
   SandboxProvider,
   MergeToHeadBranchStrategy,
   NamedBranchStrategy,
-  BindMountSandboxHandle,
-  IsolatedSandboxHandle,
-  NoSandboxHandle,
 } from "./SandboxProvider.js";
 import type { CloseResult, Sandbox } from "./createSandbox.js";
 import { createSandboxFromWorktree } from "./createSandbox.js";
@@ -35,14 +30,12 @@ import {
   buildContextWindowLines,
   buildLogFilename,
   printFileDisplayStartup,
-} from "./run.js";
-import type { LoggingOption } from "./run.js";
+} from "./RunDisplay.js";
+import type { LoggingOption } from "./RunConfig.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
 import { agentStreamEmitterLayer } from "./AgentStreamEmitter.js";
 import { resolveEnv } from "./EnvResolver.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
-import { startSandbox } from "./startSandbox.js";
-import { syncOut } from "./syncOut.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 import { copyToWorktree } from "./CopyToWorktree.js";
 import { resolveCwd } from "./resolveCwd.js";
@@ -56,7 +49,7 @@ import {
 } from "./PromptArgumentSubstitution.js";
 import { noSandbox } from "./sandboxes/no-sandbox.js";
 import { raceAbortSignal } from "./raceAbortSignal.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 
 /** Branch strategies valid for createWorktree — head is excluded. */
 export type WorktreeBranchStrategy =
@@ -267,6 +260,12 @@ export const createWorktree = async (
       ).pipe(Effect.catchAll(() => Effect.succeed(false)));
 
       if (isDirty) {
+        // Matches SandboxFactory.ts's cleanupWorktree: tell the user a
+        // worktree was left on disk instead of preserving it silently.
+        printWorktreePreservedMessage(
+          worktreeInfo.path,
+          `Worktree preserved at ${worktreeInfo.path}`,
+        );
         return { preservedWorktreePath: worktreeInfo.path } as CloseResult;
       }
 
@@ -343,48 +342,21 @@ export const createWorktree = async (
         Branch: worktreeInfo.branch,
       });
 
-      // 4. Start sandbox
-      let handle:
-        | BindMountSandboxHandle
-        | IsolatedSandboxHandle
-        | NoSandboxHandle;
-
-      if (resolvedSandbox.tag === "none") {
-        handle = yield* Effect.promise(() =>
-          resolvedSandbox.create({
-            worktreePath: worktreeInfo.path,
-            env: effectiveEnv,
-          }),
-        );
-      } else if (resolvedSandbox.tag === "isolated") {
-        const startResult = yield* d.taskLog("Starting sandbox", () =>
-          startSandbox({
-            provider: resolvedSandbox,
-            hostRepoDir: worktreeInfo.path,
-            env: effectiveEnv,
-          }),
-        );
-        handle = startResult.handle;
-      } else {
-        const gitPath = join(hostRepoDir, ".git");
-        const rawGitMounts = yield* resolveGitMounts(gitPath);
-        const gitMounts = yield* patchGitMountsForWindows(
-          rawGitMounts,
-          worktreeInfo.path,
-          SANDBOX_REPO_DIR,
-        );
-        const startResult = yield* d.taskLog("Starting sandbox", () =>
-          startSandbox({
-            provider: resolvedSandbox,
-            hostRepoDir,
-            env: effectiveEnv,
-            worktreeOrRepoPath: worktreeInfo.path,
-            gitMounts,
-            repoDir: SANDBOX_REPO_DIR,
-          }),
-        );
-        handle = startResult.handle;
-      }
+      // 4. Start a sandbox against the already-existing worktree — the same
+      // per-provider-category setup run()/interactive()/createSandbox() use
+      // via acquireSandbox, exposed standalone here because this worktree
+      // wasn't created for this one call: it's owned by createWorktree()
+      // and may back many run()/interactive() calls over its lifetime.
+      const acquired = yield* startSandboxAgainstTarget({
+        env: effectiveEnv,
+        hostRepoDir,
+        targetPath: worktreeInfo.path,
+        sandboxProvider: resolvedSandbox,
+        hooks,
+        signal: opts.signal,
+        timeouts: options.timeouts,
+      });
+      const { handle, sandbox, sandboxInfo } = acquired;
 
       // Run lifecycle — worktree owns worktree, so no worktree cleanup here
       return yield* Effect.gen(function* () {
@@ -395,13 +367,7 @@ export const createWorktree = async (
           );
         }
         const interactiveExecFn = handle.interactiveExec.bind(handle);
-        const sandbox = makeSandboxFromHandle(handle);
-        const worktreePath = handle.worktreePath;
-
-        const applyToHost =
-          resolvedSandbox.tag === "isolated"
-            ? () => syncOut(worktreeInfo.path, handle as IsolatedSandboxHandle)
-            : () => Effect.void;
+        const worktreePath = sandboxInfo.sandboxRepoPath;
 
         const lifecycleEffect = withSandboxLifecycle(
           {
@@ -412,8 +378,14 @@ export const createWorktree = async (
             // host's current branch and merges the worktree's commits back into
             // it. branch strategy: pin to the worktree's branch.
             branch: isMergeToHead ? undefined : worktreeInfo.branch,
-            hostWorktreePath: worktreeInfo.path,
-            applyToHost,
+            // worktreeInfo.path is the local worktree createWorktree() itself
+            // created — meaningless as a git target for a nativeGitTarget
+            // provider, whose repo lives elsewhere entirely.
+            hostWorktreePath: sandboxInfo.nativeGitTarget
+              ? undefined
+              : worktreeInfo.path,
+            applyToHost: sandboxInfo.applyToHost ?? (() => Effect.void),
+            nativeGitTarget: sandboxInfo.nativeGitTarget,
             timeouts: options.timeouts,
             keepSourceBranch: isMergeToHead,
           },
@@ -508,7 +480,6 @@ export const createWorktree = async (
     if (opts.resumeSession) {
       await assertResumeSessionExists({
         provider,
-        sandboxTag: sandboxProvider.tag,
         hostRepoDir,
         resumeSession: opts.resumeSession,
       });
@@ -550,55 +521,23 @@ export const createWorktree = async (
         );
       }
 
-      // 4. Start sandbox
-      let handle:
-        | BindMountSandboxHandle
-        | IsolatedSandboxHandle
-        | NoSandboxHandle;
-      let sandboxRepoDir: string;
-
-      if (sandboxProvider.tag === "isolated") {
-        const startResult = yield* startSandbox({
-          provider: sandboxProvider,
-          hostRepoDir: worktreeInfo.path,
+      // 4. Start a sandbox against the already-existing worktree — the
+      // same per-provider-category setup run()/interactive()/
+      // createSandbox() use via acquireSandbox, exposed standalone here
+      // because this worktree wasn't created for this one call: it's owned
+      // by createWorktree() and may back many run() calls over its lifetime.
+      const { handle, sandbox, sandboxInfo } = yield* startSandboxAgainstTarget(
+        {
           env: effectiveEnv,
-        });
-        handle = startResult.handle;
-        sandboxRepoDir = startResult.worktreePath;
-      } else if (sandboxProvider.tag === "none") {
-        const startResult = yield* startSandbox({
-          provider: sandboxProvider,
           hostRepoDir,
-          env: effectiveEnv,
-          worktreeOrRepoPath: worktreeInfo.path,
-        });
-        handle = startResult.handle;
-        sandboxRepoDir = startResult.worktreePath;
-      } else {
-        const gitPath = join(hostRepoDir, ".git");
-        const rawGitMounts = yield* resolveGitMounts(gitPath);
-        const gitMounts = yield* patchGitMountsForWindows(
-          rawGitMounts,
-          worktreeInfo.path,
-          SANDBOX_REPO_DIR,
-        );
-        const startResult = yield* startSandbox({
-          provider: sandboxProvider,
-          hostRepoDir,
-          env: effectiveEnv,
-          worktreeOrRepoPath: worktreeInfo.path,
-          gitMounts,
-          repoDir: SANDBOX_REPO_DIR,
-        });
-        handle = startResult.handle;
-        sandboxRepoDir = startResult.worktreePath;
-      }
-
-      const sandbox = makeSandboxFromHandle(handle);
-      const applyToHost =
-        sandboxProvider.tag === "isolated"
-          ? () => syncOut(worktreeInfo.path, handle as IsolatedSandboxHandle)
-          : () => Effect.void;
+          targetPath: worktreeInfo.path,
+          sandboxProvider,
+          hooks,
+          signal: opts.signal,
+          timeouts: options.timeouts,
+        },
+      );
+      const sandboxRepoDir = sandboxInfo.sandboxRepoPath;
 
       // 5. Resolve logging
       const resolvedLogging: LoggingOption = opts.logging ?? {
@@ -626,26 +565,13 @@ export const createWorktree = async (
             })()
           : ClackDisplay.layer;
 
-      // Pre-narrow the bind-mount handle for the orchestrator's session-capture
-      // path. Gated on the provider tag so we never hand a NoSandbox/Isolated
-      // handle (which lack copyFileIn/copyFileOut) to AgentSessionStorage.
-      const bindMountHandle =
-        sandboxProvider.tag === "bind-mount"
-          ? (handle as BindMountSandboxHandle)
-          : undefined;
-
-      // 6. Build a SandboxFactory that reuses the started sandbox
+      // 6. Build a SandboxFactory that reuses the started sandbox.
+      // `sandboxInfo` already carries `bindMountHandle`/`applyToHost`
+      // correctly per provider category — startSandboxAgainstTarget just
+      // populated it — so there's no need to re-derive either by hand here.
       const reuseFactoryLayer = Layer.succeed(SandboxFactory, {
         withSandbox: (makeEffect) =>
-          makeEffect(
-            {
-              hostWorktreePath: worktreeInfo.path,
-              sandboxRepoPath: sandboxRepoDir,
-              applyToHost,
-              bindMountHandle,
-            },
-            sandbox,
-          ).pipe(
+          makeEffect(sandboxInfo, sandbox).pipe(
             Effect.map((value) => ({
               value,
               preservedWorktreePath: undefined,

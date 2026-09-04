@@ -15,7 +15,7 @@ import { spawn, type StdioOptions } from "node:child_process";
 import { createInterface } from "node:readline";
 import type {
   NoSandboxProvider,
-  NoSandboxHandle,
+  SandboxHandle,
   ExecResult,
   InteractiveExecOptions,
 } from "../SandboxProvider.js";
@@ -46,12 +46,12 @@ export const noSandbox = (options?: NoSandboxOptions): NoSandboxProvider => ({
   tag: "none",
   name: "no-sandbox",
   env: options?.env ?? {},
-  create: async (createOptions): Promise<NoSandboxHandle> => {
+  create: async (createOptions): Promise<SandboxHandle> => {
     const worktreePath = createOptions.worktreePath;
     const processEnv = { ...process.env, ...createOptions.env };
     const maxOutputTailChars = options?.maxOutputTailChars ?? MAX_TAIL_CHARS;
 
-    const handle: NoSandboxHandle = {
+    const handle: SandboxHandle = {
       worktreePath,
 
       exec: (

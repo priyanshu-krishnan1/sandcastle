@@ -21,10 +21,7 @@ import {
   hostHasDependency,
   getTemplateDependencies,
 } from "./InitService.js";
-import type {
-  IssueTrackerEntry,
-  SandboxProviderEntry,
-} from "./InitService.js";
+import type { IssueTrackerEntry, SandboxProviderEntry } from "./InitService.js";
 import { ConfigDirError, InitError } from "./errors.js";
 import { VERSION } from "./version.js";
 

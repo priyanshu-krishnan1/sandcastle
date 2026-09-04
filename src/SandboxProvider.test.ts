@@ -2,17 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
-  type BindMountSandboxHandle,
-  type IsolatedSandboxHandle,
+  type SandboxHandle,
   type SandboxProvider,
 } from "./SandboxProvider.js";
 
 describe("createBindMountSandboxProvider", () => {
-  const makeMockHandle = (): BindMountSandboxHandle => ({
+  const makeMockHandle = (): SandboxHandle => ({
     worktreePath: "/workspace",
     exec: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })),
-    copyFileIn: vi.fn(async () => {}),
-    copyFileOut: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
   });
 
@@ -67,11 +64,13 @@ describe("createBindMountSandboxProvider", () => {
 });
 
 describe("createIsolatedSandboxProvider", () => {
-  const makeMockHandle = (): IsolatedSandboxHandle => ({
+  const makeMockHandle = (): SandboxHandle => ({
     worktreePath: "/workspace",
     exec: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })),
-    copyIn: vi.fn(async () => {}),
-    copyFileOut: vi.fn(async () => {}),
+    transfer: {
+      copyIn: vi.fn(async () => {}),
+      copyFileOut: vi.fn(async () => {}),
+    },
     close: vi.fn(async () => {}),
   });
 

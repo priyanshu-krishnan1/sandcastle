@@ -10,7 +10,7 @@ import { copyFile, cp, mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   createIsolatedSandboxProvider,
-  type IsolatedSandboxHandle,
+  type SandboxHandle,
   type IsolatedSandboxProvider,
 } from "../SandboxProvider.js";
 import { createTempSandbox } from "./test-shared.js";
@@ -25,24 +25,26 @@ import { createTempSandbox } from "./test-shared.js";
 export const testIsolated = (): IsolatedSandboxProvider =>
   createIsolatedSandboxProvider({
     name: "test-isolated",
-    create: async (): Promise<IsolatedSandboxHandle> => {
+    create: async (): Promise<SandboxHandle> => {
       const temp = await createTempSandbox("sandcastle-test-");
 
       return {
         worktreePath: temp.worktreePath,
         exec: temp.exec,
-        copyIn: async (hostPath, sandboxPath) => {
-          const info = await stat(hostPath);
-          if (info.isDirectory()) {
-            await cp(hostPath, sandboxPath, { recursive: true });
-          } else {
-            await mkdir(dirname(sandboxPath), { recursive: true });
-            await copyFile(hostPath, sandboxPath);
-          }
-        },
-        copyFileOut: async (sandboxPath, hostPath) => {
-          await mkdir(dirname(hostPath), { recursive: true });
-          await copyFile(sandboxPath, hostPath);
+        transfer: {
+          copyIn: async (hostPath, sandboxPath) => {
+            const info = await stat(hostPath);
+            if (info.isDirectory()) {
+              await cp(hostPath, sandboxPath, { recursive: true });
+            } else {
+              await mkdir(dirname(sandboxPath), { recursive: true });
+              await copyFile(hostPath, sandboxPath);
+            }
+          },
+          copyFileOut: async (sandboxPath, hostPath) => {
+            await mkdir(dirname(hostPath), { recursive: true });
+            await copyFile(sandboxPath, hostPath);
+          },
         },
         close: temp.close,
       };

@@ -9,10 +9,11 @@ import {
 } from "./errors.js";
 import type { SandboxError } from "./errors.js";
 import type { SandboxService } from "./SandboxFactory.js";
-import { SandboxFactory, SANDBOX_REPO_DIR } from "./SandboxFactory.js";
+import { SandboxFactory } from "./SandboxFactory.js";
+import { SANDBOX_REPO_DIR } from "./mountUtils.js";
 import { withSandboxLifecycle, type SandboxHooks } from "./SandboxLifecycle.js";
 import type { AgentProvider, IterationUsage } from "./AgentProvider.js";
-import type { Timeouts } from "./run.js";
+import type { Timeouts } from "./RunConfig.js";
 import { TextDeltaBuffer } from "./TextDeltaBuffer.js";
 
 export type { ParsedStreamEvent, IterationUsage } from "./AgentProvider.js";
@@ -175,7 +176,13 @@ const invokeAgent = (
           for (const parsed of provider.parseStreamLine(line)) {
             if (parsed.type === "text") {
               onText(parsed.text);
-              accumulatedOutput += parsed.text;
+              // Non-assertive text (e.g. reasoning/chain-of-thought
+              // commentary) is shown to the user via onText but excluded
+              // from the completion-signal-eligible buffer — see the
+              // `assertive` doc comment on ParsedStreamEvent.
+              if (parsed.assertive !== false) {
+                accumulatedOutput += parsed.text;
+              }
             } else if (parsed.type === "result") {
               resultText = parsed.result;
               accumulatedOutput += parsed.result;
@@ -415,7 +422,13 @@ export const orchestrate = (
       // SandboxLifecycleResult<WithSandboxResult<...>> wrapping.
       const iterationEffect = factory.withSandbox(
         (
-          { hostWorktreePath, sandboxRepoPath, applyToHost, bindMountHandle },
+          {
+            hostWorktreePath,
+            sandboxRepoPath,
+            applyToHost,
+            bindMountHandle,
+            nativeGitTarget,
+          },
           sandbox,
         ) =>
           withSandboxLifecycle(
@@ -426,6 +439,7 @@ export const orchestrate = (
               branch,
               hostWorktreePath,
               applyToHost,
+              nativeGitTarget,
               signal: options.signal,
               timeouts: options.timeouts,
               keepSourceBranch: options.keepSourceBranch,

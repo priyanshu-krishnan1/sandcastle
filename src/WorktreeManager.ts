@@ -307,6 +307,16 @@ export const create = (
       .makeDirectory(worktreesDir, { recursive: true })
       .pipe(Effect.mapError((e) => new WorktreeError({ message: e.message })));
 
+    // `git worktree list` canonicalizes paths via realpath (e.g. macOS's
+    // /tmp -> /private/tmp symlink). If repoDir or .sandcastle is reached
+    // through a symlink, comparing the un-canonicalized worktreesDir against
+    // git's resolved paths below never matches, and a worktree that's
+    // genuinely managed by sandcastle looks external — see the identical fix
+    // (and its explanation) in `pruneStale` below.
+    const realWorktreesDir = yield* fs
+      .realPath(worktreesDir)
+      .pipe(Effect.catchAll(() => Effect.succeed(worktreesDir)));
+
     let branch: string;
     let worktreeName: string;
 
@@ -326,7 +336,13 @@ export const create = (
       }
     }
 
-    const worktreePath = join(worktreesDir, worktreeName);
+    // Built from realWorktreesDir (not worktreesDir) so it's directly
+    // comparable to git's own realpath-resolved output — both in
+    // findCollidingWorktree's path-fallback match below (the mid-rebase
+    // detached-HEAD case, where the branch match can't be used) and in the
+    // path this function returns, which must be consistent whether this run
+    // took the fresh-create or the reuse branch.
+    const worktreePath = join(realWorktreesDir, worktreeName);
 
     if (opts?.branch) {
       // Proactively detect collision before git produces a confusing error.
@@ -336,7 +352,7 @@ export const create = (
       const collision = findCollidingWorktree(existing, branch, worktreePath);
       if (collision) {
         // Only reuse worktrees managed by sandcastle (under .sandcastle/worktrees/)
-        if (isManagedWorktreePath(collision.path, worktreesDir)) {
+        if (isManagedWorktreePath(collision.path, realWorktreesDir)) {
           const dirty = yield* hasUncommittedChanges(collision.path);
           if (dirty) {
             console.warn(
@@ -441,18 +457,20 @@ export const hasUncommittedChanges = (
 /**
  * Removes a worktree and its git metadata.
  *
- * The `worktreePath` must be a path inside `.sandcastle/worktrees/` so that
- * the main repository directory can be derived from it.
+ * Runs `git worktree remove` with `worktreePath` itself as the command's
+ * `cwd` — a worktree is a valid git working directory in its own right, so
+ * this needs no separate main-repo-dir lookup. (Previously derived the repo
+ * dir via `join(worktreePath, "..", "..", "..")`, assuming the fixed
+ * `<repoDir>/.sandcastle/worktrees/<name>` depth; that broke whenever an
+ * ancestor of `worktreePath` — `.sandcastle` itself, in particular — was a
+ * symlink, since resolving it could change the apparent nesting depth.)
  */
 export const remove = (
   worktreePath: string,
-): Effect.Effect<void, WorktreeError> => {
-  // Derive the main repo dir: worktreePath = <repoDir>/.sandcastle/worktrees/<name>
-  const repoDir = join(worktreePath, "..", "..", "..");
-  return execGit(["worktree", "remove", "--force", worktreePath], repoDir).pipe(
+): Effect.Effect<void, WorktreeError> =>
+  execGit(["worktree", "remove", "--force", worktreePath], worktreePath).pipe(
     Effect.asVoid,
   );
-};
 
 /**
  * Prunes stale git worktree metadata and removes orphaned directories under

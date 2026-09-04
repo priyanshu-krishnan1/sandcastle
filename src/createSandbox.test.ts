@@ -1,12 +1,12 @@
 import { exec } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import { createSandbox, type CreateSandboxOptions } from "./createSandbox.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import {
@@ -22,8 +22,6 @@ const testSandbox = createBindMountSandboxProvider({
   create: async () => ({
     worktreePath: "/home/agent/workspace",
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-    copyFileIn: async () => {},
-    copyFileOut: async () => {},
     close: async () => {},
   }),
 });
@@ -53,7 +51,9 @@ const toStreamJson = (output: string): string => {
   lines.push(
     JSON.stringify({ type: "message", role: "assistant", content: output }),
   );
-  lines.push(JSON.stringify({ type: "result", status: "success", result: output }));
+  lines.push(
+    JSON.stringify({ type: "result", status: "success", result: output }),
+  );
   return lines.join("\n");
 };
 
@@ -127,9 +127,7 @@ const makeMockIsolatedProvider = (
       return {
         ...handle,
         exec: async (command: string, options?: any) => {
-          const agent = AGENT_PREFIXES.find((a) =>
-            command.includes(a.prefix),
-          );
+          const agent = AGENT_PREFIXES.find((a) => command.includes(a.prefix));
           if (agent && options?.onLine) {
             const cwd = options?.cwd ?? handle.worktreePath;
             const output = await mockAgentBehavior(cwd);
@@ -455,7 +453,11 @@ describe("createSandbox", () => {
   });
 
   it("sandbox.exec() allows the caller to override the default cwd", async () => {
-    const hostDir = await mkdtemp(join(tmpdir(), "sandbox-test-"));
+    // Resolved so `pwd`'s OS-resolved output (e.g. macOS's /tmp -> /private/tmp)
+    // compares equal to the directory we actually passed as cwd.
+    const hostDir = await realpath(
+      await mkdtemp(join(tmpdir(), "sandbox-test-")),
+    );
     await initRepo(hostDir);
     await commitFile(hostDir, "init.txt", "init", "initial commit");
 
@@ -517,8 +519,6 @@ describe("createSandbox", () => {
             exitCode: 0,
           };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -916,8 +916,6 @@ describe("createSandbox", () => {
               exitCode: 0,
             };
           },
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {
             closeCallCount++;
           },
@@ -991,8 +989,6 @@ describe("createSandbox", () => {
             exitCode: 0,
           };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {
           providerClosed = true;
         },
@@ -1223,8 +1219,6 @@ describe("createSandbox", () => {
           receivedArgs.push(...args);
           return { exitCode: 0 };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -1273,8 +1267,6 @@ describe("createSandbox", () => {
             };
           },
           interactiveExec: async () => ({ exitCode: 0 }),
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         };
       },
@@ -1333,8 +1325,6 @@ describe("createSandbox", () => {
           await execAsync('git commit -m "interactive commit"', { cwd });
           return { exitCode: 0 };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -1378,8 +1368,6 @@ describe("createSandbox", () => {
             exitCode: 0,
           };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -1427,8 +1415,6 @@ describe("createSandbox", () => {
           receivedArgs.push(...args);
           return { exitCode: 0 };
         },
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -1611,8 +1597,6 @@ describe("createSandbox", () => {
           };
         },
         interactiveExec: async () => ({ exitCode: 0 }),
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });
@@ -1655,8 +1639,6 @@ describe("createSandbox", () => {
           };
         },
         interactiveExec: async () => ({ exitCode: 0 }),
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {},
       }),
     });

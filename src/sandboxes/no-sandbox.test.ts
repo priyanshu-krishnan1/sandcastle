@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { noSandbox } from "./no-sandbox.js";
 
@@ -66,7 +67,9 @@ describe("noSandbox", () => {
       });
 
       const result = await handle.exec("pwd", { cwd: "/tmp" });
-      expect(result.stdout.trim()).toBe("/tmp");
+      // realpathSync: `pwd`'s output is OS-resolved (e.g. macOS's
+      // /tmp -> /private/tmp), so the expected value must be too.
+      expect(result.stdout.trim()).toBe(realpathSync("/tmp"));
     });
 
     it("exec ignores sudo option (no-op)", async () => {
@@ -120,7 +123,7 @@ describe("noSandbox", () => {
           env: {},
         });
 
-        const result = await handle.interactiveExec(["sh", "-c", "exit 0"], {
+        const result = await handle.interactiveExec!(["sh", "-c", "exit 0"], {
           stdin: process.stdin,
           stdout: process.stdout,
           stderr: process.stderr,
@@ -139,7 +142,7 @@ describe("noSandbox", () => {
           env: {},
         });
 
-        const result = await handle.interactiveExec(
+        const result = await handle.interactiveExec!(
           ["cmd.exe", "/d", "/s", "/c", "exit 0"],
           {
             stdin: process.stdin,

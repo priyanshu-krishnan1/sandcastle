@@ -8,8 +8,7 @@ import { promisify } from "node:util";
 import {
   createBindMountSandboxProvider,
   createIsolatedSandboxProvider,
-  type BindMountSandboxHandle,
-  type IsolatedSandboxHandle,
+  type SandboxHandle,
 } from "./SandboxProvider.js";
 import { SANDBOX_REPO_DIR } from "./SandboxFactory.js";
 import { startSandbox, COPY_PATHS_TIMEOUT_MS } from "./startSandbox.js";
@@ -46,8 +45,6 @@ describe("startSandbox", () => {
           return {
             worktreePath: SANDBOX_REPO_DIR,
             exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-            copyFileIn: async () => {},
-            copyFileOut: async () => {},
             close: async () => {},
           };
         },
@@ -86,8 +83,6 @@ describe("startSandbox", () => {
         create: async () => ({
           worktreePath: SANDBOX_REPO_DIR,
           exec: async () => ({ stdout: "hello", stderr: "", exitCode: 0 }),
-          copyFileIn: async () => {},
-          copyFileOut: async () => {},
           close: async () => {},
         }),
       });
@@ -191,13 +186,16 @@ describe("startSandbox", () => {
           const handle = await realProvider.create(options);
           return {
             ...handle,
-            copyIn: (hostPath: string, sandboxPath: string) => {
-              // Allow syncIn's copyIn calls (bundle files) to succeed,
-              // but hang on everything else
-              if (sandboxPath.includes("repo.bundle")) {
-                return handle.copyIn(hostPath, sandboxPath);
-              }
-              return new Promise<void>(() => {}); // never resolves
+            transfer: {
+              ...handle.transfer!,
+              copyIn: (hostPath: string, sandboxPath: string) => {
+                // Allow syncIn's copyIn calls (bundle files) to succeed,
+                // but hang on everything else
+                if (sandboxPath.includes("repo.bundle")) {
+                  return handle.transfer!.copyIn(hostPath, sandboxPath);
+                }
+                return new Promise<void>(() => {}); // never resolves
+              },
             },
           };
         },

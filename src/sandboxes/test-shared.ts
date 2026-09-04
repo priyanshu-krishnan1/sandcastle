@@ -7,13 +7,13 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   createBindMountSandboxProvider,
-  type BindMountSandboxHandle,
+  type SandboxHandle,
   type BindMountSandboxProvider,
   type ExecResult,
 } from "../SandboxProvider.js";
@@ -35,7 +35,9 @@ export interface TempSandbox {
 export const createTempSandbox = async (
   prefix: string,
 ): Promise<TempSandbox> => {
-  const sandboxRoot = await mkdtemp(join(tmpdir(), prefix));
+  // Resolved so a spawned command's `pwd` output — always OS-resolved, e.g.
+  // macOS's /tmp -> /private/tmp — compares equal to `worktreePath` below.
+  const sandboxRoot = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   const worktreePath = join(sandboxRoot, "workspace");
   await mkdir(worktreePath, { recursive: true });
 
@@ -131,11 +133,9 @@ export const testStubProvider = (
     name: options.name ?? "test-stub",
     create: async (createOptions) => {
       createCalls.push(createOptions);
-      const handle: BindMountSandboxHandle = {
+      const handle: SandboxHandle = {
         worktreePath: options.worktreePath ?? "/home/agent/workspace",
         exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-        copyFileIn: async () => {},
-        copyFileOut: async () => {},
         close: async () => {
           closeCalls.count++;
         },

@@ -18,7 +18,7 @@ import {
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import type { BindMountSandboxHandle } from "./SandboxProvider.js";
+import type { SandboxHandle } from "./SandboxProvider.js";
 
 // ---------------------------------------------------------------------------
 // encodeProjectPath
@@ -499,7 +499,7 @@ describe("claudeSubagentsDirOnHost", () => {
 
 describe("listClaudeSubagentSessionsInSandbox", () => {
   /** Bind-mount handle backed by the host filesystem (sandbox path == host path). */
-  const fsHandle = (): Pick<BindMountSandboxHandle, "exec"> => ({
+  const fsHandle = (): Pick<SandboxHandle, "exec"> => ({
     exec: async (command) => {
       const { exec } = await import("node:child_process");
       return new Promise((resolve) => {

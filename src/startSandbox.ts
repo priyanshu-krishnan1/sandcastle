@@ -13,20 +13,18 @@ import {
 import type {
   SandboxProvider,
   BindMountSandboxProvider,
-  BindMountSandboxHandle,
   IsolatedSandboxProvider,
-  IsolatedSandboxHandle,
   NoSandboxProvider,
-  NoSandboxHandle,
+  SandboxHandle,
 } from "./SandboxProvider.js";
+import { requireTransfer } from "./SandboxProvider.js";
 import {
   type SandboxService,
   type MountEntry,
   makeSandboxFromHandle,
-  SANDBOX_REPO_DIR,
 } from "./SandboxFactory.js";
 import { syncIn } from "./syncIn.js";
-import { normalizeMounts } from "./mountUtils.js";
+import { normalizeMounts, SANDBOX_REPO_DIR } from "./mountUtils.js";
 
 export interface StartSandboxBindMountOptions {
   provider: BindMountSandboxProvider;
@@ -65,7 +63,7 @@ export type StartSandboxOptions =
   | StartSandboxNoSandboxOptions;
 
 export interface StartSandboxResult {
-  handle: BindMountSandboxHandle | IsolatedSandboxHandle | NoSandboxHandle;
+  handle: SandboxHandle;
   sandbox: SandboxService;
   worktreePath: string;
 }
@@ -227,7 +225,11 @@ const startIsolatedSandbox = (
           // regardless of host platform.
           const sandboxPath = posix.join(handle.worktreePath, relativePath);
           yield* Effect.tryPromise({
-            try: () => handle.copyIn(hostPath, sandboxPath),
+            try: () =>
+              requireTransfer(handle, "copyPaths").copyIn(
+                hostPath,
+                sandboxPath,
+              ),
             catch: (e) =>
               new WorktreeError({
                 message: `Failed to copy ${relativePath} into sandbox: ${e instanceof Error ? e.message : String(e)}`,

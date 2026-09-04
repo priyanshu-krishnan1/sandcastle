@@ -6,12 +6,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Display, type DisplayEntry, SilentDisplay } from "./Display.js";
 import { makeLocalSandbox } from "./testSandbox.js";
 import { orchestrate } from "./Orchestrator.js";
 import { substitutePromptArgs } from "./PromptArgumentSubstitution.js";
-import { bob } from "./AgentProvider.js";
+import { bob } from "./agents/bob.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import type { DockerError, SandboxError } from "./errors.js";
 import { AgentError, AgentIdleTimeoutError } from "./errors.js";
@@ -22,6 +22,13 @@ import {
 } from "./AgentStreamEmitter.js";
 
 const noopAgentStreamEmitterLayer = agentStreamEmitterLayer();
+
+// Most tests here do at least one real sandbox-lifecycle cycle (worktree
+// creation + git identity + commit collection); under full-suite parallel
+// load that can exceed vitest's 5s default — same class of flake fixed for
+// syncOut.test.ts and Orchestrator.iterationRetries.test.ts elsewhere in
+// this repo.
+vi.setConfig({ testTimeout: 30000 });
 
 const execAsync = promisify(exec);
 
@@ -308,6 +315,72 @@ describe("Orchestrator", () => {
     // Custom signal not in output, so all iterations run
     expect(result.iterations.length).toBe(2);
     expect(result.completionSignal).toBeUndefined();
+  });
+
+  it("does not complete from a signal that appears only in non-assertive (reasoning) text", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Mock agent: emits a raw stream-json line sequence directly (bypassing
+    // toStreamJson's single-string wrapper) so a reasoning-flagged message
+    // containing the literal completion signal can be exercised end-to-end
+    // through the real bob() parser and Orchestrator.ts's onLine handler.
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const real = makeLocalSandbox(dir);
+        return {
+          exec: (command, options) => {
+            if (command.includes("bob run") && options?.onLine) {
+              const onLine = options.onLine;
+              return Effect.sync(() => {
+                const lines = [
+                  JSON.stringify({
+                    type: "message",
+                    role: "assistant",
+                    isReasoning: true,
+                    content:
+                      "Once everything passes I'll emit <promise>COMPLETE</promise> to finish up.",
+                  }),
+                  JSON.stringify({
+                    type: "message",
+                    role: "assistant",
+                    content: "Still working on it.",
+                  }),
+                  JSON.stringify({
+                    type: "result",
+                    status: "success",
+                    result: "Still working on it.",
+                  }),
+                ];
+                for (const line of lines) onLine(line);
+                return { stdout: lines.join("\n"), stderr: "", exitCode: 0 };
+              });
+            }
+            return real.exec(command, options);
+          },
+          copyIn: real.copyIn,
+          copyFileOut: real.copyFileOut,
+        };
+      },
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+
+        iterations: 1,
+        prompt: "do some work",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    // The signal only ever appeared inside isReasoning:true content — must
+    // never be mistaken for the agent asserting completion.
+    expect(result.completionSignal).toBeUndefined();
+    expect(result.iterations.length).toBe(1);
   });
 
   it("stops early when any signal in an array matches", async () => {
@@ -1418,7 +1491,6 @@ describe("Orchestrator error handling", () => {
       }
     }
   });
-
 });
 
 describe("Orchestrator streaming", () => {
