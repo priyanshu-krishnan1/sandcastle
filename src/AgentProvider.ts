@@ -1,5 +1,5 @@
 import type { SandboxHandle } from "./SandboxProvider.js";
-import type { HostSessionLookup } from "./SessionStore.js";
+import type { HostSessionLookup } from "./engine/session/SessionStore.js";
 
 export type ParsedStreamEvent =
   | {

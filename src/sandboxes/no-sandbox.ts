@@ -19,7 +19,7 @@ import type {
   ExecResult,
   InteractiveExecOptions,
 } from "../SandboxProvider.js";
-import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../utils/boundedTail.js";
 
 export interface NoSandboxOptions {
   /** Environment variables injected by this provider. Merged at launch time. */

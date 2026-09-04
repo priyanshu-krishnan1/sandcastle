@@ -1,0 +1,205 @@
+---
+title: API Reference
+description: run(), interactive(), createSandbox(), createWorktree(), structured output, and errors.
+---
+
+## `run()`
+
+`src/engine/run/run.ts`. The main entry point — one fixed loop: invoke the agent up to `maxIterations` times, stop early once a completion signal is seen in the agent's own assistant text.
+
+```typescript
+import { run, bob, fyre } from "@ai-hero/sandcastle";
+
+const result = await run({
+  agent: bob("default"),
+  sandbox: fyre({ host: "my-host" }),
+  promptFile: ".sandcastle/prompt.md",
+  maxIterations: 5,
+});
+```
+
+### Options
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `agent` | `AgentProvider` | — | required |
+| `sandbox` | `SandboxProvider` | — | required |
+| `cwd` | `string` | `process.cwd()` | anchors `.sandcastle/worktrees`, `.sandcastle/.env`, `.sandcastle/logs`, `.sandcastle/patches` |
+| `prompt` | `string` | — | mutually exclusive with `promptFile`; passed through verbatim, no substitution |
+| `promptFile` | `string` | — | mutually exclusive with `prompt`; always resolved against `process.cwd()`, not `cwd` |
+| `maxIterations` | `number` | `1` | |
+| `hooks` | `SandboxHooks` | — | see below |
+| `promptArgs` | `Record<string,string>` | `{}` | `{{KEY}}` substitution; ignored/rejected for inline prompts |
+| `logging` | `LoggingOption` | auto file under `.sandcastle/logs/` | `{ type: "file", path, onAgentStreamEvent?, verbose? }` or `{ type: "stdout", onAgentStreamEvent?, verbose? }` |
+| `completionSignal` | `string \| string[]` | `"<promise>COMPLETE</promise>"` | matched via `includes` against the agent's own assistant text |
+| `idleTimeoutSeconds` | `number` | `600` | fails the run if no output for this long |
+| `completionTimeoutSeconds` | `number` | `60` | grace window after the signal fires, in case the process doesn't exit (e.g. a backgrounded child holding stdout open); resets on every line; force-completes with a warning on expiry |
+| `name` | `string` | — | prefix in log output |
+| `copyToWorktree` | `string[]` | — | host-relative paths copied into the worktree before sandbox start; incompatible with `head` |
+| `branchStrategy` | `BranchStrategy` | `head` (bind-mount/none) or `merge-to-head` (isolated) | see [Sandbox Providers](/docs/sandbox-providers) |
+| `resumeSession` | `string` | — | requires `provider.sessionStorage`; incompatible with `maxIterations > 1` |
+| `signal` | `AbortSignal` | — | pre-aborted rejects immediately; mid-iteration abort kills the subprocess; worktree preserved on abort |
+| `timeouts` | `Timeouts` | see below | |
+| `iterationRetries` | `number` | `0` | extra attempts per iteration on `AgentError`/`AgentIdleTimeoutError`; each retry gets a fresh sandbox; sandbox/git/hook failures are never retried |
+| `output` | `OutputDefinition` | — | see [Structured output](#structured-output); requires `maxIterations: 1` |
+
+`Timeouts` (all optional, override built-in lifecycle-step defaults):
+
+| Key | Default |
+| --- | --- |
+| `copyToWorktreeMs` | `60_000` |
+| `gitSetupMs` | `10_000` |
+| `commitCollectionMs` | `30_000` |
+| `mergeToHostMs` | `30_000` |
+
+`SOURCE_BRANCH` and `TARGET_BRANCH` are injected automatically into `promptArgs` for template prompts (not inline prompts) — `SOURCE_BRANCH` is the branch the agent is working on, `TARGET_BRANCH` is the host's branch at the time `run()` was called.
+
+### `RunResult`
+
+```typescript
+interface RunResult {
+  iterations: IterationResult[];
+  completionSignal?: string;
+  stdout: string;
+  commits: { sha: string }[];
+  branch: string;
+  logFilePath?: string;
+  preservedWorktreePath?: string; // set when the run succeeded but left uncommitted changes
+  resume?: (prompt: string, options?) => Promise<RunResult>; // present only if a sessionId was captured
+  fork?: (prompt: string, options?) => Promise<RunResult>;   // same condition; parent session left untouched
+}
+```
+
+## `interactive()`
+
+`src/cli/interactive.ts`. Launches the agent's own interactive UI (a human drives it), then runs the same branch-strategy/commit-collection logic as `run()` afterward.
+
+```typescript
+import { interactive, bob } from "@ai-hero/sandcastle";
+
+await interactive({
+  agent: bob("default"),
+  // sandbox defaults to noSandbox()
+  promptFile: ".sandcastle/prompt.md",
+});
+```
+
+Requires `provider.buildInteractiveArgs` and the sandbox handle's `interactiveExec`. Options mirror `run()` minus `maxIterations`/`logging`/`completionSignal`/timeouts: `agent`, `sandbox?`, `prompt?`/`promptFile?`, `name?`, `branchStrategy?`, `hooks?`, `copyToWorktree?`, `promptArgs?`, `env?`, `cwd?`, `signal?`. If a prompt file has `{{KEY}}` placeholders with no matching `promptArgs`, the missing ones are collected via interactive text prompts. Returns `{ commits, branch, preservedWorktreePath?, exitCode }`.
+
+## `createSandbox()`
+
+`src/engine/sandbox/createSandbox.ts`. Creates a worktree on an explicit branch and starts a sandbox against it, returning a handle you can call `.run()` on repeatedly — the container and worktree stay warm between calls, so file/git state persists.
+
+```typescript
+import { createSandbox, bob, fyre } from "@ai-hero/sandcastle";
+
+const sandbox = await createSandbox({
+  branch: "agent/my-task",
+  sandbox: fyre({ host: "my-host" }),
+});
+
+const first = await sandbox.run({ agent: bob("default"), prompt: "..." });
+const second = await sandbox.run({ agent: bob("default"), prompt: "..." }); // same warm sandbox
+
+await sandbox.close();
+```
+
+`CreateSandboxOptions`: `branch` (required), `baseBranch?`, `sandbox`, `cwd?`, `hooks?`, `copyToWorktree?`, `timeouts?`.
+
+`Sandbox`:
+
+```typescript
+interface Sandbox {
+  readonly branch: string;
+  readonly worktreePath: string;
+  run(options: SandboxRunOptions): Promise<SandboxRunResult>;
+  interactive(options: SandboxInteractiveOptions): Promise<SandboxInteractiveResult>;
+  exec(command: string, options?): Promise<ExecResult>;
+  close(): Promise<{ preservedWorktreePath?: string }>;
+  [Symbol.asyncDispose](): Promise<void>; // `await using sandbox = ...`
+}
+```
+
+`sandbox.run()` takes the same iteration-level options as `run()` (`agent`, `prompt`/`promptFile`, `maxIterations`, `promptArgs`, `completionSignal`, `idleTimeoutSeconds`, `completionTimeoutSeconds`, `name`, `logging`, `iterationRetries`, `resumeSession`, `signal`) minus `sandbox`/`branchStrategy`/`cwd`/`hooks`/`copyToWorktree`, which are fixed by the sandbox itself. `SandboxRunResult` carries `.resume()`/`.fork()` under the same session-capture condition as `RunResult`.
+
+## `createWorktree()`
+
+`src/engine/sandbox/createWorktree.ts`. Creates a worktree as a standalone object, independent of any one sandbox — only `branch` and `merge-to-head` strategies are allowed (`head` has no worktree, so it's a type error here).
+
+```typescript
+import { createWorktree, bob, fyre } from "@ai-hero/sandcastle";
+
+const worktree = await createWorktree({
+  branchStrategy: { type: "branch", branch: "agent/my-task" },
+});
+
+await worktree.run({ agent: bob("default"), sandbox: fyre({ host: "my-host" }), prompt: "..." });
+await worktree.interactive({ agent: bob("default"), prompt: "..." }); // sandbox defaults to noSandbox()
+const sandbox = await worktree.createSandbox({ sandbox: fyre({ host: "my-host" }) }); // long-lived Sandbox on the same worktree
+
+await worktree.close();
+```
+
+`CreateWorktreeOptions`: `branchStrategy` (`{ type: "branch", branch, baseBranch? }` or `{ type: "merge-to-head" }`), `cwd?`, `copyToWorktree?`, `hooks?`, `timeouts?`.
+
+`Worktree`: `branch`, `worktreePath`, `.run(options)` (sandbox required), `.interactive(options)` (sandbox optional, defaults to `noSandbox()`), `.createSandbox(options)` (returns a `Sandbox` backed by this worktree), `.close()`, `[Symbol.asyncDispose]`.
+
+## Structured output
+
+`src/engine/prompts/Output.ts`. Extracts and validates a tagged block from the agent's stdout after a single-iteration run.
+
+```typescript
+import { run, bob, fyre, Output } from "@ai-hero/sandcastle";
+import { z } from "zod";
+
+const result = await run({
+  agent: bob("default"),
+  sandbox: fyre({ host: "my-host" }),
+  prompt: "Investigate the bug and answer in <result>{...}</result>.",
+  output: Output.object({
+    tag: "result",
+    schema: z.object({ rootCause: z.string(), confidence: z.number() }),
+    maxRetries: 0, // requires provider.sessionStorage when > 0
+  }),
+});
+
+result.output.rootCause; // typed
+```
+
+- `Output.object({ tag, schema, maxRetries? })` — finds the last `<tag>...</tag>` occurrence, strips optional Markdown code fences, `JSON.parse`s, then validates against any Standard Schema validator (Zod, Valibot, etc.).
+- `Output.string({ tag, maxRetries? })` — finds the last `<tag>...</tag>` occurrence, trims whitespace, returns it as-is.
+- `run()` requires `maxIterations: 1` when `output` is set, and fails immediately if the resolved prompt doesn't literally contain the opening tag — Sandcastle never injects the instruction to emit it.
+- `maxRetries > 0` requires `provider.sessionStorage`: on failure, `run()` resumes the same session with a feedback prompt describing the parse/validation error and retries.
+- On failure (tag missing, JSON parse error, or schema validation error), `run()` throws `StructuredOutputError`, carrying `tag`, `rawMatched`, `cause`, `commits`, `branch`, `preservedWorktreePath?`, `sessionId?`, `sessionFilePath?` — enough to resume or recover without losing the run's side effects.
+
+## `matchCompletionSignal`
+
+```typescript
+import { matchCompletionSignal } from "@ai-hero/sandcastle";
+
+matchCompletionSignal(text: string, signal: string | string[]): string | undefined
+```
+
+The same substring-match logic `run()`/`Orchestrator.ts` use internally to detect a completion signal in the agent's assistant text, exported as a standalone pure function.
+
+## Hooks
+
+`SandboxHooks`, passed as `hooks` to `run()`/`createSandbox()`/`createWorktree()`:
+
+```typescript
+interface SandboxHooks {
+  host?: {
+    onWorktreeReady?: { command: string; timeoutMs?: number }[]; // after worktree creation, before sandbox start
+    onSandboxReady?: { command: string; timeoutMs?: number }[];  // after the sandbox is up
+  };
+  sandbox?: {
+    onSandboxReady?: { command: string; sudo?: boolean; timeoutMs?: number }[];
+  };
+}
+```
+
+Host hooks run on the machine calling Sandcastle; sandbox hooks run inside the sandbox. `onSandboxReady` hooks (both host and sandbox) run concurrently.
+
+## Errors
+
+`src/errors/errors.ts`. All are Effect `Data.TaggedError` classes, unioned as `SandboxError`: `ExecError`, `ExecHostError`, `CopyError`, `DockerError`, `PodmanError`, `SyncError`, `WorktreeError`, `PromptError`, `AgentError`, `ConfigDirError`, `InitError`, `AgentIdleTimeoutError`, `WorktreeTimeoutError`, `ContainerStartTimeoutError`, `CopyToWorktreeTimeoutError`, `CopyToWorktreeError`, `SyncInTimeoutError`, `HookTimeoutError`, `GitSetupTimeoutError`, `PromptExpansionTimeoutError`, `CommitCollectionTimeoutError`, `MergeToHostTimeoutError`, `SessionCaptureError`, plus `CwdError` (thrown when a given `cwd` doesn't exist or isn't a directory). `run()`/`interactive()`/`createSandbox()` surface these as rejected promises — the public API is plain `async`/`await`, not Effect.

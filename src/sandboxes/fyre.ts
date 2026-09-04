@@ -35,8 +35,8 @@ import {
   type NoSandboxProvider,
   type SandboxHandle,
 } from "../SandboxProvider.js";
-import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
-import { shellQuote } from "../shellQuote.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../utils/boundedTail.js";
+import { shellQuote } from "../utils/shellQuote.js";
 
 export interface FyreOptions {
   /** SSH host alias or hostname. */

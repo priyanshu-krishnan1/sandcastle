@@ -7,7 +7,7 @@ A TypeScript toolkit that orchestrates AI coding agents inside isolated sandbox 
 ### Core concepts
 
 **Sandcastle**:
-The TypeScript CLI tool that orchestrates an **agent** inside a **sandbox**.
+The TypeScript library (with a small scaffolding CLI, `sandcastle init`) that orchestrates an **agent** inside a **sandbox**.
 _Avoid_: "the tool", "the CLI", "RALPH"
 
 **Sandbox**:
@@ -19,7 +19,7 @@ The developer's machine where Sandcastle runs and the real git repo lives.
 _Avoid_: "local" (ambiguous -- the sandbox also has a local filesystem)
 
 **Agent**:
-The AI coding tool invoked inside the **sandbox** (e.g. Claude Code, Codex).
+The AI coding tool invoked inside the **sandbox** (e.g. Bob-Shell, the only built-in **agent provider** -- agent is swappable via a custom one).
 _Avoid_: "RALPH", "the bot", "Claude" (too specific -- agent is swappable)
 
 ### Sandboxes
@@ -39,6 +39,10 @@ _Avoid_: "remote provider", "sync provider"
 **No-sandbox provider**:
 A **sandbox provider** where no container is created -- the **agent** runs directly on the **host**.
 _Avoid_: "local provider", "none provider", "host provider"
+
+**Native git target**:
+A **no-sandbox provider** whose repository is not reachable through the **host**'s own filesystem -- e.g. `fyreNative()`/`remoteDaemonNative()`, which run against a repo on a remote machine reached only through the provider's own `exec`. Signalled by `nativeGitTarget: true` on the provider; when set, git operations (branch detection, merge, commit collection) run through the provider's `exec` instead of the local host's git.
+_Avoid_: "remote host mode", "SSH mode"
 
 ### Branching
 
@@ -77,10 +81,6 @@ A pluggable implementation that builds commands and parses output for a specific
 _Avoid_: "agent adapter", "agent driver"
 
 ### Execution
-
-**Agent invoker**:
-The Effect service (`Context.Tag`) that wraps the raw call handing a fully-resolved **prompt** to the **agent provider** for one **iteration**. The seam used to substitute a recording or scripted fake in tests without running a real **agent**.
-_Avoid_: "agent runner", "agent caller"
 
 **Iteration**:
 A single invocation of the **agent** inside the **sandbox**, producing at most one commit against one **task**.
@@ -178,24 +178,16 @@ _Avoid_: "template expansion", "interpolation"
 
 ### Infrastructure
 
-**Build-image**:
-A provider-namespaced CLI command that rebuilds the image (e.g. `sandcastle docker build-image`).
-_Avoid_: "setup-sandbox" (old name)
-
-**Remove-image**:
-A provider-namespaced CLI command that removes the image (e.g. `sandcastle docker remove-image`).
-_Avoid_: "cleanup-sandbox" (old name)
-
 **Agent session**:
-The **agent**'s persisted conversation record. Storage shape and location are owned by the **agent provider** -- Claude Code writes a `<session-id>.jsonl` under `~/.claude/projects/<encoded-cwd>/`; other agents use their own conventions (e.g. `~/.codex/sessions/`, `~/.pi/agent/sessions/`, OpenCode's SQLite store). Resumable when the **agent provider** declares session-storage support; the resume mechanism is the agent's native flag (e.g. `claude --resume`, `codex exec resume`, `pi --session`).
+The **agent**'s persisted conversation record. Storage shape, location, and transfer are owned by the **agent provider** through the optional `AgentSessionStorage` interface (`captureToHost`/`resumeIntoSandbox`/`readHostSession`/`existsOnHost`). `bob`, the only built-in **agent provider**, does not implement it -- Bob-Shell's session model is a remote task id, not a file Sandcastle can copy, so it has no resumable **agent session** today.
 _Avoid_: "chat history", "transcript"
 
 **Session resume**:
-Continuing an **agent session** by appending new turns to the same session record -- the session ID is unchanged and the prior record is mutated in place. Exposed as `RunResult.resume()`.
+Continuing an **agent session** by appending new turns to the same session record -- the session ID is unchanged and the prior record is mutated in place. Exposed as `RunResult.resume()`. Requires the **agent provider** to declare `sessionStorage`.
 _Avoid_: "continue", "follow-up"
 
 **Session fork**:
-Branching an **agent session** into a new record with a new session ID, leaving the parent record byte-for-byte unchanged. Uses the **agent**'s native fork flag (`claude --fork-session`, `codex exec fork`). Exposed as `RunResult.fork()`. Isolates the session only -- not the **source branch** or **sandbox**.
+Branching an **agent session** into a new record with a new session ID, leaving the parent record byte-for-byte unchanged. Exposed as `RunResult.fork()`. Isolates the session only -- not the **source branch** or **sandbox**; concurrent forks need distinct branches (the `head` and `merge-to-head` **branch strategies** are not safe for concurrent forks).
 _Avoid_: "branch" (overloaded with git branches), "copy session"
 
 ### Display
@@ -213,5 +205,5 @@ The display mode where Sandcastle renders an interactive UI in the terminal with
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
 
 **Agent stream event**:
-A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`.
+A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Delivered via the `onAgentStreamEvent` callback on the `logging` option, available in both **log-to-file mode** and **terminal mode**. Each event carries its `iteration` number and a `timestamp`.
 _Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)

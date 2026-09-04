@@ -1,48 +1,66 @@
 ---
 title: Configuration
-description: Configure Sandcastle for your project.
+description: The .sandcastle/ directory, environment variables, and prompt file syntax.
 ---
 
-## Config Directory
+## `.sandcastle/` directory
 
-The `.sandcastle/` directory in your repository contains all Sandcastle configuration:
+There is no config file that changes Sandcastle's runtime behavior — configuration is a script you write (`.sandcastle/main.ts`/`main.mts`) that calls `run()`, `interactive()`, `createSandbox()`, or `createWorktree()` directly with plain TypeScript options. `sandcastle init` scaffolds:
 
-- `config.json` -- Main configuration file
-- `Dockerfile` -- Defines the sandbox environment
-- `prompt.md` -- The prompt sent to the agent each iteration
-- `.env` / `.env.example` -- Environment variables for the sandbox
+| File | Purpose |
+| --- | --- |
+| `Dockerfile` / `Containerfile` | Image definition, used if you build and use a Docker/Podman-based sandbox provider. |
+| `.env` / `.env.example` | Environment variables — see below. |
+| `.gitignore` | Ignores `.env`, `logs/`, `worktrees/`. |
+| `main.ts` / `main.mts` | Your script. |
+| `*-prompt.md` | Prompt file(s), depending on the chosen template. |
 
-## Config File
+At runtime, Sandcastle also creates (relative to `cwd`, default `process.cwd()`):
 
-The `config.json` file controls how Sandcastle operates:
+- `.sandcastle/worktrees/` — git worktrees created for `merge-to-head`/`branch` strategies.
+- `.sandcastle/logs/` — the default destination for `logging: { type: "file" }`.
+- `.sandcastle/patches/<timestamp>/` — diffs/untracked files preserved when applying an isolated sandbox's changes back to the host fails partway through.
 
-```json
-{
-  "agent": "claude-code",
-  "maxIterations": 10
-}
+## Environment variables
+
+`resolveEnv()` (`src/engine/sandbox/EnvResolver.ts`) reads **only** `.sandcastle/.env`:
+
+- Every `KEY=value` line in `.sandcastle/.env` is resolved; if the value is empty, it falls back to `process.env[KEY]`.
+- Keys that only exist in `process.env` (not declared in `.sandcastle/.env` at all) are **not** picked up.
+- A repository-root `.env` is not part of this resolution — only `.sandcastle/.env`.
+- Values may be single- or double-quoted; double-quoted values support `\n`, `\r`, `\t`, `\\` escapes.
+
+The resolved map is merged with the agent provider's `env` and the sandbox provider's `env` (`mergeProviderEnv`) before the sandbox starts.
+
+## Prompts
+
+A prompt is either an inline string (`prompt`) or a file (`promptFile`). Inline prompts are passed to the agent verbatim — no substitution, no shell expansion. File-based prompts go through two preprocessing steps, in order:
+
+### 1. `{{KEY}}` argument substitution
+
+`{{KEY}}` placeholders are replaced with values from `promptArgs`. Two keys are injected automatically for template prompts: `SOURCE_BRANCH` (the branch the agent is working on) and `TARGET_BRANCH` (the host's branch when the run started) — passing either explicitly in `promptArgs` is an error.
+
+### 2. `` !`command` `` shell expansion
+
+A `` !`command` `` marker is replaced with the stdout of running `command` inside the sandbox, before the agent sees the prompt. Each expression gets a 30-second timeout; a non-zero exit fails the run with `PromptError`.
+
+```markdown
+# Context
+
+!`git log --oneline -10`
+!`gh issue list --label Sandcastle --json number,title`
+
+# Task
+
+Fix the highest-priority open issue.
+
+# Done
+
+When finished, output <promise>COMPLETE</promise>.
 ```
 
-### Options
+## Completion signal
 
-| Option          | Description                | Default         |
-| --------------- | -------------------------- | --------------- |
-| `agent`         | The agent provider to use  | `"claude-code"` |
-| `maxIterations` | Maximum iterations per run | `10`            |
+`run()`/`interactive()` stop the iteration loop early once the agent's own assistant text contains the configured `completionSignal` (default `"<promise>COMPLETE</promise>"`, matched via substring `includes`). This check only looks at text the agent provider's `parseStreamLine` marks as assistant output (`assertive` text) — it does not scan the raw prompt echo, reasoning/chain-of-thought text, or tool-call output, so a signal string appearing incidentally elsewhere doesn't fire it early.
 
-## Prompt
-
-The `prompt.md` file is the instruction text passed to the agent at the start of each iteration. It supports:
-
-- **Prompt arguments** -- `{{KEY}}` placeholders replaced with values from `promptArgs`
-- **Shell expressions** -- `` !`command` `` markers that evaluate shell commands inside the sandbox
-
-## Environment Variables
-
-Sandcastle resolves environment variables from multiple sources in order:
-
-1. Repository root `.env`
-2. Config directory `.env`
-3. `process.env`
-
-Only keys declared in a `.env` file are resolved from `process.env`.
+If the agent's process doesn't exit shortly after emitting the signal (for example, a backgrounded `gh` or git child process still holding stdout open), `completionTimeoutSeconds` (default 60) force-completes the iteration with a warning rather than waiting out the full `idleTimeoutSeconds`.

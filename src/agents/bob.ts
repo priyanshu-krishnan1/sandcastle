@@ -1,4 +1,4 @@
-import { shellQuote } from "../shellQuote.js";
+import { shellQuote } from "../utils/shellQuote.js";
 import type {
   AgentProvider,
   AgentCommandOptions,

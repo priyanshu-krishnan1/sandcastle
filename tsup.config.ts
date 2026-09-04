@@ -11,6 +11,7 @@ export default defineConfig({
     main: "src/main.ts",
     "sandboxes/fyre": "src/sandboxes/fyre.ts",
     "sandboxes/no-sandbox": "src/sandboxes/no-sandbox.ts",
+    "sandboxes/remoteDaemon": "src/sandboxes/remoteDaemon.ts",
     "agents/bob": "src/agents/bob.ts",
   },
   format: ["esm"],
