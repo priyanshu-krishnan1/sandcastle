@@ -17,7 +17,7 @@ import {
   type BindMountSandboxProvider,
   type ExecResult,
 } from "../SandboxProvider.js";
-import { BoundedTail, MAX_TAIL_CHARS } from "../boundedTail.js";
+import { BoundedTail, MAX_TAIL_CHARS } from "../utils/boundedTail.js";
 
 export interface TempSandbox {
   readonly worktreePath: string;

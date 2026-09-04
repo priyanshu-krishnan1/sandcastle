@@ -1,41 +1,80 @@
 ---
 title: Getting Started
-description: Learn how to use Sandcastle to orchestrate AI coding agents in isolated sandbox environments.
+description: What Sandcastle is and how its pieces fit together.
 ---
 
 ## What is Sandcastle?
 
-Sandcastle is a TypeScript CLI tool that orchestrates AI coding agents inside isolated sandbox environments. It manages the full lifecycle of running an agent against your codebase: syncing code into a sandbox, invoking the agent, and syncing changes back.
+Sandcastle is a TypeScript library (published as `@ai-hero/sandcastle`) for running an AI coding agent against a git repository inside a sandbox, then bringing the resulting commits back to the host. It's used by writing a small script that calls its functions — there is no runtime config file.
 
-## Key Concepts
+At its core, `run()` does three things:
 
-- **Sandbox** -- An isolated environment (Docker container or local directory) where an agent executes code
-- **Host** -- Your machine where Sandcastle runs and the real git repo lives
-- **Agent** -- The AI coding tool invoked inside the sandbox (e.g. Claude Code)
-- **Iteration** -- A single invocation of the agent, producing at most one commit
+1. Creates a git worktree and starts a sandbox (a **sandbox provider**).
+2. Invokes an AI CLI inside it, once per iteration (an **agent provider**), until the agent signals it's done or `maxIterations` is reached.
+3. Merges or collects the commits the agent made, according to a **branch strategy**.
 
-## Quick Start
-
-### 1. Install
+## Install
 
 ```bash
 npm install --save-dev @ai-hero/sandcastle
 ```
 
-### 2. Initialize
+The package ships one CLI command, `sandcastle init`, plus a library API (`run`, `interactive`, `createSandbox`, `createWorktree`, ...) that you import into your own script.
 
-Run `npx @ai-hero/sandcastle init` in your repository to scaffold the config directory:
+## Scaffold a project
 
 ```bash
 npx @ai-hero/sandcastle init
 ```
 
-This creates a `.sandcastle/` directory with a Dockerfile, prompt file, and configuration.
+This prompts for (or accepts as flags):
 
-### 3. Run
+- `--template` — one of the templates listed below.
+- `--sandbox` — `docker` or `podman`. This only picks which container-image file gets scaffolded (a `Dockerfile` or a `Containerfile`) — it does not select a runtime sandbox provider. See [Sandbox Providers](/docs/sandbox-providers).
+- `--issue-tracker` — `github-issues`, `beads`, or `custom`. Substitutes the task-listing/viewing/closing commands into the generated prompt.
+- `--model` — the mode/model passed to `bob`, the only built-in agent.
 
-```bash
-npx tsx .sandcastle/main.ts
+It creates a `.sandcastle/` directory containing:
+
+| File | Purpose |
+| --- | --- |
+| `Dockerfile` or `Containerfile` | Image definition for the sandbox environment. |
+| `.env.example` / `.env` | Environment variables (agent API key, issue-tracker token). See [Configuration](/docs/configuration). |
+| `.gitignore` | Ignores `.env`, `logs/`, `worktrees/`. |
+| `main.ts` or `main.mts` | The script you run — calls `run()` with your chosen agent and sandbox. |
+| One or more `*-prompt.md` files | Prompt(s) sent to the agent, depending on the template. |
+
+Templates (`--template`):
+
+| Name | What it scaffolds |
+| --- | --- |
+| `blank` | A single prompt file and a `run()` call — write your own orchestration. |
+| `simple-loop` | Picks issues one by one and closes them. |
+| `sequential-reviewer` | Implements issues one by one, with a review step after each. |
+| `parallel-planner` | Plans parallelizable issues, executes each on its own branch, merges. |
+| `parallel-planner-with-review` | Same as above, with a review step per branch. |
+
+The `blank` template's generated `main.mts` looks like this:
+
+```typescript
+import { run, bob, fyre } from "@ai-hero/sandcastle";
+
+await run({
+  agent: bob("default"),
+  sandbox: fyre({ host: "your-host.example.com" }),
+  promptFile: "./.sandcastle/prompt.md",
+});
 ```
 
-Sandcastle will build the Docker image, sync your code into the sandbox, and start the agent.
+Fill in `.sandcastle/.env` (copy `.env.example`) with `BOB_API_KEY` and whatever your sandbox provider needs, point `fyre()` at a real host (or swap in another provider — see [Sandbox Providers](/docs/sandbox-providers)), then run it:
+
+```bash
+npx tsx .sandcastle/main.mts
+```
+
+## Where to go next
+
+- [Configuration](/docs/configuration) — the `.sandcastle/` directory, environment variables, and prompt file syntax.
+- [Sandbox Providers](/docs/sandbox-providers) — the built-in providers (`fyre`, `remoteDaemon`, `noSandbox`) and how to write your own.
+- [Agent Providers](/docs/agent-providers) — the `bob` provider and the `AgentProvider` interface.
+- [API Reference](/docs/api-reference) — `run()`, `interactive()`, `createSandbox()`, `createWorktree()`, and structured output.

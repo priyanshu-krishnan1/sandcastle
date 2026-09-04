@@ -1,0 +1,166 @@
+---
+title: Sandbox Providers
+description: The SandboxProvider interface and the providers built into Sandcastle.
+---
+
+## The `sandbox` option
+
+`run()`, `interactive()`, and `createSandbox()` all take a `sandbox: SandboxProvider`. A provider is one of three tagged shapes:
+
+| Tag | Filesystem | Branch strategies |
+| --- | --- | --- |
+| `"bind-mount"` | Shares the host's worktree via a volume mount. | `head`, `merge-to-head`, `branch` |
+| `"isolated"` | Has its own filesystem; code moves in/out via `transfer.copyIn` / `copyFileOut`. | `merge-to-head`, `branch` |
+| `"none"` | No container — the agent runs directly on the host (or, with `nativeGitTarget: true`, on another machine reached only through the handle's own `exec`). | `head`, `merge-to-head`, `branch` |
+
+Every provider produces a `SandboxHandle`:
+
+```typescript
+interface SandboxHandle {
+  readonly worktreePath: string;
+  exec(command: string, options?: {
+    onLine?: (line: string) => void;
+    cwd?: string;
+    sudo?: boolean;
+    stdin?: string;
+  }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  interactiveExec?(args: string[], options: {
+    stdin: NodeJS.ReadableStream;
+    stdout: NodeJS.WritableStream;
+    stderr: NodeJS.WritableStream;
+    cwd?: string;
+  }): Promise<{ exitCode: number }>;
+  readonly transfer?: {
+    copyIn(hostPath: string, sandboxPath: string): Promise<void>;
+    copyFileOut(sandboxPath: string, hostPath: string): Promise<void>;
+  };
+  close(): Promise<void>;
+}
+```
+
+`exec` must stream output line-by-line via `onLine` — this is how Sandcastle shows live progress and enforces `idleTimeoutSeconds`. A batch implementation that only calls `onLine` after the process exits does not satisfy the contract.
+
+## Built-in providers
+
+### `fyre` / `fyreNative`
+
+`src/sandboxes/fyre.ts`. SSH-based — every command is run via `ssh`/`scp`/`tar` child processes, no Docker involved.
+
+```typescript
+import { fyre } from "@ai-hero/sandcastle";
+
+fyre({
+  host: string,
+  user?: string,
+  identityFile?: string,
+  sshArgs?: string[],
+  scpArgs?: string[],
+  remoteRoot?: string,       // default: /tmp/sandcastle-<uuid>
+  env?: Record<string, string>,
+  maxOutputTailChars?: number, // default: 65536
+}) // -> IsolatedSandboxProvider
+```
+
+`transfer.copyIn` tars a directory and `scp`s it (or `scp`s a single file directly); `close()` runs `rm -rf` on `remoteRoot` over SSH.
+
+```typescript
+import { fyreNative } from "@ai-hero/sandcastle";
+
+fyreNative({
+  host: string,
+  repoPath: string,          // required — the repo already on the remote host
+  user?: string,
+  identityFile?: string,
+  sshArgs?: string[],
+  shell?: string,            // default: "bash"
+  env?: Record<string, string>,
+  maxOutputTailChars?: number,
+}) // -> NoSandboxProvider, nativeGitTarget: true
+```
+
+`fyreNative` doesn't sync anything — it runs directly against a repository that already exists on the remote host, reached only through SSH. Because `nativeGitTarget` is `true`, Sandcastle routes all git operations (branch detection, merge, commit collection) through the SSH handle instead of the local machine's git.
+
+### `remoteDaemon` / `remoteDaemonNative`
+
+`src/sandboxes/remoteDaemon.ts` (`./sandboxes/remoteDaemon` subpath export). Same shape as `fyre`/`fyreNative`, but instead of spawning a new SSH process per command, it opens one persistent, multiplexed mTLS gRPC connection to an `agentd` daemon running on the target host.
+
+```typescript
+import { remoteDaemon } from "@ai-hero/sandcastle/sandboxes/remoteDaemon";
+
+remoteDaemon({
+  host: string,
+  port?: number,              // default: 8443
+  tls: {
+    clientCertFile: string,
+    clientKeyFile: string,
+    caCertFile: string,
+    serverName?: string,
+  },
+  remoteRoot?: string,
+  env?: Record<string, string>,
+  maxOutputTailChars?: number,
+  connectTimeoutMs?: number,  // default: 5000
+}) // -> IsolatedSandboxProvider
+
+remoteDaemonNative({
+  host: string,
+  port?: number,
+  tls: { /* same as above */ },
+  repoPath: string,           // required
+  shell?: string,             // default: "bash"
+  env?: Record<string, string>,
+}) // -> NoSandboxProvider, nativeGitTarget: true
+```
+
+`agentd` is a separate Go binary (`agentd/`, protocol in `proto/agentd/v1/agentd.proto`) that exposes five gRPC RPCs:
+
+| RPC | Shape | Purpose |
+| --- | --- | --- |
+| `Exec` | server-streaming | Runs `sh -c <command>`, streaming stdout/stderr lines, then an exit event. |
+| `InteractiveExec` | bidi | PTY/pipe execution for `interactive()` — stdin/resize in, stdout/stderr/exit out. |
+| `CopyIn` | client-streaming | Host → sandbox transfer, chunked, SHA-256 verified; directories are tar.gz'd. |
+| `CopyOut` | server-streaming | Sandbox → host transfer, chunked, SHA-256 verified. |
+| `Health` | unary | Point-in-time load/activity snapshot. |
+
+Setting it up is a manual mTLS bootstrap: one CA, one server certificate per host running `agentd`, one client certificate for the machine running Sandcastle. Any client certificate signed by the CA is trusted — there's no per-client access list. See `agentd/README.md` for building and running the daemon.
+
+### `noSandbox`
+
+`src/sandboxes/no-sandbox.ts`. Runs the agent directly on the local machine — no isolation, and it does **not** pass a permissions-bypass flag to the agent, so the agent's own permission prompts apply.
+
+```typescript
+import { noSandbox } from "@ai-hero/sandcastle";
+
+noSandbox(options?: { env?: Record<string, string> }) // -> NoSandboxProvider
+```
+
+Cross-platform: `sh -c` on POSIX, `cmd.exe /d /s /c` on Windows. Supports all three branch strategies (default `head`). `close()` is a no-op. This is `interactive()`'s default sandbox when none is given.
+
+## Branch strategies
+
+Passed as `branchStrategy` to `run()`, `createSandbox()` (via `createWorktree()`), or `interactive()`.
+
+```typescript
+type BranchStrategy =
+  | { type: "head" }
+  | { type: "merge-to-head" }
+  | { type: "branch"; branch: string; baseBranch?: string };
+```
+
+- **`head`** — the agent writes directly into the host's current working directory. Bind-mount and no-sandbox providers only (isolated providers have no host filesystem to write into). `run()` defaults to this for bind-mount/none providers.
+- **`merge-to-head`** — Sandcastle creates a temporary branch, the agent commits to it, and it's merged back into the host's branch that was checked out at the start of the run, then deleted. `run()` defaults to this for isolated providers.
+- **`branch`** — commits land on an explicit named branch (`branch`), created from `baseBranch` (default `HEAD`) if it doesn't already exist.
+
+## Writing a custom provider
+
+```typescript
+import {
+  createBindMountSandboxProvider,
+  createIsolatedSandboxProvider,
+} from "@ai-hero/sandcastle";
+```
+
+- `createBindMountSandboxProvider({ name, env?, sandboxHomedir?, create })` — `create` receives `{ worktreePath, hostRepoPath, mounts, env }` and returns a `SandboxHandle`. Omit `transfer` — nothing calls it, since the sandbox already shares the host filesystem.
+- `createIsolatedSandboxProvider({ name, env?, create })` — `create` receives `{ env }` and returns a `SandboxHandle`. `transfer` is required here — it's the only way code reaches the sandbox.
+
+For a `NoSandboxProvider`, construct the object literal directly (tag `"none"`, `create: ({ worktreePath, env }) => Promise<SandboxHandle>`, plus optional `nativeGitTarget`). `fyre.ts`/`no-sandbox.ts`/`remoteDaemon.ts` are the reference implementations for all three shapes.

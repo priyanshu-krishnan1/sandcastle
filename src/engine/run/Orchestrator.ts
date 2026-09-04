@@ -1,0 +1,740 @@
+import { Deferred, Duration, Effect, Fiber, Schedule } from "effect";
+import { AgentStreamEmitter } from "../display/AgentStreamEmitter.js";
+import { Display } from "../display/Display.js";
+import { preprocessPrompt } from "../prompts/PromptPreprocessor.js";
+import {
+  AgentError,
+  AgentIdleTimeoutError,
+  SessionCaptureError,
+} from "../../errors/errors.js";
+import type { SandboxError } from "../../errors/errors.js";
+import type { SandboxService } from "../sandbox/SandboxFactory.js";
+import { SandboxFactory } from "../sandbox/SandboxFactory.js";
+import { SANDBOX_REPO_DIR } from "../sandbox/mountUtils.js";
+import {
+  withSandboxLifecycle,
+  type SandboxHooks,
+} from "../sandbox/SandboxLifecycle.js";
+import type { AgentProvider, IterationUsage } from "../../AgentProvider.js";
+import type { Timeouts } from "./RunConfig.js";
+import { TextDeltaBuffer } from "../display/TextDeltaBuffer.js";
+
+export type { ParsedStreamEvent, IterationUsage } from "../../AgentProvider.js";
+
+const IDLE_WARNING_INTERVAL_MS = 60_000;
+
+/**
+ * Scan accumulated agent output for a completion signal, returning the first
+ * matching signal string or `undefined`. This is the exact matching logic
+ * `orchestrate()` uses internally to decide when an agent has finished —
+ * exported so custom orchestration built on `createSandbox()`/`createWorktree()`
+ * (calling `.run()` repeatedly under your own control flow instead of through
+ * `run()`'s built-in iteration loop) can apply the same semantics to each
+ * step's output without reimplementing it.
+ *
+ * Matches by substring against the given text — callers driving their own
+ * orchestration should scan the same accumulated/parsed output `run()` would
+ * (not raw stdout, which can echo the prompt itself and false-positive on the
+ * signal — see the `AgentInvocationResult.completionSignal` doc comment).
+ */
+export const matchCompletionSignal = (
+  output: string,
+  completionSignal: string | readonly string[] | undefined,
+): string | undefined => {
+  const signals =
+    completionSignal === undefined
+      ? [DEFAULT_COMPLETION_SIGNAL]
+      : Array.isArray(completionSignal)
+        ? completionSignal
+        : [completionSignal as string];
+  return signals.find((sig) => output.includes(sig));
+};
+
+/**
+ * What one agent invocation hands back to the orchestrator.
+ *
+ * `completionSignal` is the signal matched against the *parsed* stream
+ * (`accumulatedOutput`) — never against raw stdout. Raw stdout contains lines
+ * the provider's parser deliberately drops, notably the agent echoing the
+ * prompt it was given, and the prompt is exactly where the completion signal
+ * is defined. Re-scanning `result` downstream would match that echo and report
+ * a completion the agent never made.
+ */
+interface AgentInvocationResult {
+  readonly result: string;
+  readonly sessionId?: string;
+  readonly usage?: IterationUsage;
+  readonly completionSignal?: string;
+}
+
+const invokeAgent = (
+  sandbox: SandboxService,
+  sandboxRepoDir: string,
+  prompt: string,
+  provider: AgentProvider,
+  idleTimeoutMs: number,
+  completionTimeoutMs: number,
+  completionSignals: readonly string[],
+  onText: (text: string) => void,
+  onToolCall: (name: string, formattedArgs: string) => void,
+  onRawLine: (line: string) => void,
+  onIdleWarning: (minutes: number) => void,
+  onCompletionTimeout: (timeoutMs: number) => void,
+  idleWarningIntervalMs: number = IDLE_WARNING_INTERVAL_MS,
+  resumeSession?: string,
+  forkSession?: boolean,
+  signal?: AbortSignal,
+): Effect.Effect<AgentInvocationResult, SandboxError> =>
+  Effect.gen(function* () {
+    let resultText = "";
+    let sessionId: string | undefined;
+    let usage: IterationUsage | undefined;
+    // Accumulated text/result output, scanned for the completion signal so a
+    // hanging process can be force-completed once the signal is in the buffer
+    // (see ADR 0019).
+    let accumulatedOutput = "";
+
+    // Deferred that fails when the idle timer fires (no signal seen).
+    const timeoutSignal = yield* Deferred.make<never, AgentIdleTimeoutError>();
+    // Deferred that resolves successfully when the completion-grace timer
+    // fires (signal seen but process hasn't exited). Resolving lets the race
+    // hand control back to the orchestrator with the buffered output, which
+    // still contains the signal so the existing completionSignal check works.
+    const completionTimeoutDeferred = yield* Deferred.make<
+      AgentInvocationResult,
+      never
+    >();
+    let timeoutFiber: Fiber.RuntimeFiber<unknown, unknown> | null = null;
+    let completionDetected = false;
+    let matchedSignal: string | undefined;
+
+    // Periodic idle warning state
+    let warningFiber: Fiber.RuntimeFiber<unknown, unknown> | null = null;
+    let idleMinuteCounter = 0;
+
+    const interruptFiber = (
+      fiber: Fiber.RuntimeFiber<unknown, unknown> | null,
+    ) => {
+      if (fiber !== null) Effect.runFork(Fiber.interrupt(fiber));
+    };
+
+    const startWarningInterval = () => {
+      interruptFiber(warningFiber);
+      idleMinuteCounter = 0;
+      warningFiber = Effect.runFork(
+        Effect.gen(function* () {
+          while (true) {
+            yield* Effect.sleep(Duration.millis(idleWarningIntervalMs));
+            idleMinuteCounter++;
+            onIdleWarning(idleMinuteCounter);
+          }
+        }),
+      );
+    };
+
+    const resetTimer = () => {
+      interruptFiber(timeoutFiber);
+      if (completionDetected) {
+        // Post-signal grace window — successful resolution on expiry.
+        timeoutFiber = Effect.runFork(
+          Effect.gen(function* () {
+            yield* Effect.sleep(Duration.millis(completionTimeoutMs));
+            onCompletionTimeout(completionTimeoutMs);
+            yield* Deferred.succeed(completionTimeoutDeferred, {
+              result: resultText || accumulatedOutput,
+              sessionId,
+              usage,
+              completionSignal: matchedSignal,
+            });
+          }),
+        );
+      } else {
+        // Pre-signal idle window — failure on expiry.
+        timeoutFiber = Effect.runFork(
+          Effect.gen(function* () {
+            yield* Effect.sleep(Duration.millis(idleTimeoutMs));
+            yield* Deferred.fail(
+              timeoutSignal,
+              new AgentIdleTimeoutError({
+                message: `Agent idle for ${idleTimeoutMs / 1000} seconds — no output received. Consider increasing the idle timeout with --idle-timeout.`,
+                timeoutMs: idleTimeoutMs,
+              }),
+            );
+          }),
+        );
+        // Reset warning interval on activity, idle-phase only.
+        startWarningInterval();
+      }
+    };
+
+    // Deferred that will be resolved (as a defect) when the AbortSignal fires.
+    // Uses Effect.die so the abort reason propagates as-is to run().
+    const abortDeferred = yield* Deferred.make<never, never>();
+    let abortCleanup: (() => void) | null = null;
+    if (signal) {
+      if (signal.aborted) {
+        return yield* Effect.die(signal.reason);
+      }
+      const onAbort = () => {
+        Effect.runFork(Deferred.die(abortDeferred, signal.reason));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      abortCleanup = () => signal.removeEventListener("abort", onAbort);
+    }
+
+    resetTimer();
+
+    const execEffect = Effect.gen(function* () {
+      const printCmd = provider.buildPrintCommand({
+        prompt,
+        dangerouslySkipPermissions: true,
+        resumeSession,
+        forkSession,
+      });
+      const execResult = yield* sandbox.exec(printCmd.command, {
+        onLine: (line) => {
+          // Surface the raw line FIRST so verbose mode/forwarders see every
+          // stdout line the agent produced, including ones parseStreamLine
+          // drops. Errors thrown by the callback are caught by the emitter
+          // layer; isolate the parser path here so a broken forwarder cannot
+          // skip parsing.
+          try {
+            onRawLine(line);
+          } catch {
+            // Swallow — must not skip parsing/timer logic below.
+          }
+          for (const parsed of provider.parseStreamLine(line)) {
+            if (parsed.type === "text") {
+              onText(parsed.text);
+              // Non-assertive text (e.g. reasoning/chain-of-thought
+              // commentary) is shown to the user via onText but excluded
+              // from the completion-signal-eligible buffer — see the
+              // `assertive` doc comment on ParsedStreamEvent.
+              if (parsed.assertive !== false) {
+                accumulatedOutput += parsed.text;
+              }
+            } else if (parsed.type === "result") {
+              resultText = parsed.result;
+              accumulatedOutput += parsed.result;
+            } else if (parsed.type === "tool_call") {
+              onToolCall(parsed.name, parsed.args);
+            } else if (parsed.type === "session_id") {
+              sessionId = parsed.sessionId;
+            } else if (parsed.type === "usage") {
+              usage = parsed.usage;
+            }
+          }
+          // Check for the completion signal AFTER parsing this line so the
+          // accumulator contains everything seen so far. Flip to the
+          // completion-grace timer the first time the signal appears.
+          if (!completionDetected) {
+            const found = matchCompletionSignal(
+              accumulatedOutput,
+              completionSignals,
+            );
+            if (found !== undefined) {
+              completionDetected = true;
+              matchedSignal = found;
+              interruptFiber(warningFiber);
+              warningFiber = null;
+            }
+          }
+          resetTimer();
+        },
+        cwd: sandboxRepoDir,
+        stdin: printCmd.stdin,
+      });
+
+      if (execResult.exitCode !== 0) {
+        // If the completion signal was already detected in the output, treat a
+        // non-zero exit as a clean finish. This handles the reboot case where
+        // the agent emits <promise>COMPLETE</promise> and then runs `sudo reboot`,
+        // causing the SSH connection to drop with exit 255.
+        if (completionDetected) {
+          return {
+            result: resultText || accumulatedOutput,
+            sessionId,
+            usage,
+            completionSignal: matchedSignal,
+          };
+        }
+        // Prefer stderr; fall back to resultText (from parsed stream events),
+        // then to the tail of raw stdout (last 20 non-empty lines).
+        let errorDetail = execResult.stderr;
+        if (!errorDetail.trim()) {
+          errorDetail = resultText;
+        }
+        if (!errorDetail.trim()) {
+          const lines = execResult.stdout.split("\n").filter((l) => l.trim());
+          errorDetail = lines.slice(-20).join("\n");
+        }
+        return yield* Effect.fail(
+          new AgentError({
+            message: `${provider.name} exited with code ${execResult.exitCode}:\n${errorDetail}`,
+          }),
+        );
+      }
+
+      return {
+        result: resultText || execResult.stdout,
+        sessionId,
+        usage,
+        completionSignal: matchedSignal,
+      };
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          interruptFiber(timeoutFiber);
+          timeoutFiber = null;
+          interruptFiber(warningFiber);
+          warningFiber = null;
+        }),
+      ),
+    );
+
+    let raced: Effect.Effect<
+      AgentInvocationResult,
+      AgentIdleTimeoutError | SandboxError
+    > = Effect.raceFirst(execEffect, Deferred.await(timeoutSignal));
+    raced = Effect.raceFirst(raced, Deferred.await(completionTimeoutDeferred));
+    if (signal) {
+      raced = Effect.raceFirst(
+        raced,
+        Deferred.await(abortDeferred) as Effect.Effect<never, never>,
+      );
+    }
+
+    return yield* raced.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          abortCleanup?.();
+          interruptFiber(timeoutFiber);
+          timeoutFiber = null;
+          interruptFiber(warningFiber);
+          warningFiber = null;
+        }),
+      ),
+    );
+  });
+
+const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
+const DEFAULT_IDLE_TIMEOUT_SECONDS = 10 * 60; // 600 seconds
+const DEFAULT_COMPLETION_TIMEOUT_SECONDS = 60;
+
+export interface OrchestrateOptions {
+  readonly hostRepoDir: string;
+  readonly iterations: number;
+  readonly hooks?: SandboxHooks;
+  readonly prompt: string;
+  readonly branch?: string;
+  readonly provider: AgentProvider;
+  readonly completionSignal?: string | string[];
+  /** Idle timeout in seconds. If the agent produces no output for this long, it fails with AgentIdleTimeoutError. Default: 600 (10 minutes) */
+  readonly idleTimeoutSeconds?: number;
+  /**
+   * Grace window in seconds after a completion signal is observed in the
+   * agent's output. The agent process is expected to exit shortly after
+   * emitting the signal; if it does not (because a spawned child is keeping
+   * stdout open — see ADR 0019), this timer fires and the iteration resolves
+   * successfully with the buffered output. Resets on every subsequent output
+   * line, so trailing data (token-usage events, terminal `result` events,
+   * structured-output tags) is still captured. Default: 60 seconds.
+   */
+  readonly completionTimeoutSeconds?: number;
+  /** Optional name for the run, prepended to status messages as [name] */
+  readonly name?: string;
+  /** @internal Test-only override for the idle warning interval in milliseconds. Default: 60000 (1 minute). */
+  readonly _idleWarningIntervalMs?: number;
+  /** Resume a prior Claude Code session by ID. Applied to iteration 1 only. */
+  readonly resumeSession?: string;
+  /**
+   * When true alongside `resumeSession`, fork the session instead of mutating
+   * it — the parent JSONL stays intact and the agent writes a new session
+   * under a fresh id. Applied to iteration 1 only. See ADR 0018.
+   */
+  readonly forkSession?: boolean;
+  /** An AbortSignal that cancels the orchestration when aborted. */
+  readonly signal?: AbortSignal;
+  /** When true, skip prompt expansion (shell expression evaluation). Set for dynamic inline prompts. */
+  readonly skipPromptExpansion?: boolean;
+  /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
+  readonly timeouts?: Timeouts;
+  /** Forwarded to `withSandboxLifecycle` — see `SandboxLifecycleOptions.keepSourceBranch`. */
+  readonly keepSourceBranch?: boolean;
+  /**
+   * Number of additional attempts per iteration when the agent fails with an
+   * `AgentError` or `AgentIdleTimeoutError`. Each retry spins up a completely
+   * fresh sandbox (the same path as a normal next iteration), so sandbox
+   * lifecycle is unaffected. A value of `0` (default) means no retries — fail
+   * immediately on first error. A value of `2` means up to 3 total attempts
+   * per iteration.
+   *
+   * Only `AgentError` and `AgentIdleTimeoutError` are retried. Errors from
+   * sandbox setup, git operations, or lifecycle hooks are never retried because
+   * they are structural failures that a repeat attempt cannot fix.
+   */
+  readonly iterationRetries?: number;
+}
+
+/** Per-iteration result carrying an optional session ID. */
+export interface IterationResult {
+  /** Claude Code session ID extracted from the init line, or undefined for non-Claude agents. */
+  readonly sessionId?: string;
+  /** Absolute host path to the captured session JSONL, or undefined when capture is disabled or provider is non-Claude. */
+  readonly sessionFilePath?: string;
+  /** Token usage snapshot from the last assistant message in the session, or undefined when capture is disabled or provider does not support usage parsing. */
+  readonly usage?: IterationUsage;
+}
+
+export interface OrchestrateResult {
+  /** Per-iteration results (use `iterations.length` for the count). */
+  readonly iterations: IterationResult[];
+  /** The matched completion signal string, or undefined if none fired. */
+  readonly completionSignal?: string;
+  readonly stdout: string;
+  readonly commits: { sha: string }[];
+  readonly branch: string;
+  /** Host path to the preserved worktree from the last iteration, set when the worktree was left behind due to uncommitted changes on a successful run. */
+  readonly preservedWorktreePath?: string;
+}
+
+export const orchestrate = (
+  options: OrchestrateOptions,
+): Effect.Effect<
+  OrchestrateResult,
+  SandboxError,
+  SandboxFactory | Display | AgentStreamEmitter
+> => {
+  const idleTimeoutMs =
+    (options.idleTimeoutSeconds ?? DEFAULT_IDLE_TIMEOUT_SECONDS) * 1000;
+  const completionTimeoutMs =
+    (options.completionTimeoutSeconds ?? DEFAULT_COMPLETION_TIMEOUT_SECONDS) *
+    1000;
+  const maxRetries = options.iterationRetries ?? 0;
+  return Effect.gen(function* () {
+    const factory = yield* SandboxFactory;
+    const display = yield* Display;
+    const streamEmitter = yield* AgentStreamEmitter;
+    const { hostRepoDir, iterations, hooks, prompt, branch, provider } =
+      options;
+    let completionSignals: string[];
+    if (options.completionSignal === undefined) {
+      completionSignals = [DEFAULT_COMPLETION_SIGNAL];
+    } else if (Array.isArray(options.completionSignal)) {
+      completionSignals = options.completionSignal;
+    } else {
+      completionSignals = [options.completionSignal];
+    }
+
+    const label = (msg: string): string =>
+      options.name ? `[${options.name}] ${msg}` : msg;
+
+    const allCommits: { sha: string }[] = [];
+    const allIterations: IterationResult[] = [];
+    let allStdout = "";
+    let resolvedBranch = "";
+    let iterationPreservedPath: string | undefined;
+
+    // Helper: check abort signal and bail via defect so run() can
+    // re-throw the signal's reason verbatim (no Sandcastle wrapping).
+    const checkAbort = (): Effect.Effect<void> =>
+      options.signal?.aborted ? Effect.die(options.signal.reason) : Effect.void;
+
+    for (let i = 1; i <= iterations; i++) {
+      yield* checkAbort();
+      yield* display.status(label(`Iteration ${i}/${iterations}`), "info");
+
+      // Retry budget per iteration: only AgentError and AgentIdleTimeoutError
+      // are eligible. Sandbox setup, git, and lifecycle failures are structural
+      // and are never retried. Each retry creates a fresh sandbox (same path as
+      // a normal iteration) so sandbox lifecycle is completely unaffected.
+      let retryAttempt = 0;
+      // Assign to inferred type — explicit annotation would fight the nested
+      // SandboxLifecycleResult<WithSandboxResult<...>> wrapping.
+      const iterationEffect = factory.withSandbox(
+        (
+          {
+            hostWorktreePath,
+            sandboxRepoPath,
+            applyToHost,
+            bindMountHandle,
+            nativeGitTarget,
+          },
+          sandbox,
+        ) =>
+          withSandboxLifecycle(
+            {
+              hostRepoDir,
+              sandboxRepoDir: sandboxRepoPath,
+              hooks,
+              branch,
+              hostWorktreePath,
+              applyToHost,
+              nativeGitTarget,
+              signal: options.signal,
+              timeouts: options.timeouts,
+              keepSourceBranch: options.keepSourceBranch,
+            },
+            sandbox,
+            (ctx) =>
+              Effect.gen(function* () {
+                // Resume session: transfer JSONL from host to sandbox before iteration 1
+                const iterationResumeSession =
+                  i === 1 ? options.resumeSession : undefined;
+                const iterationForkSession =
+                  i === 1 ? options.forkSession : undefined;
+                if (
+                  iterationResumeSession &&
+                  bindMountHandle &&
+                  provider.sessionStorage
+                ) {
+                  yield* display.status(label("Resuming session"), "info");
+                  yield* Effect.tryPromise({
+                    try: () =>
+                      provider.sessionStorage!.resumeIntoSandbox({
+                        hostCwd: hostRepoDir,
+                        sandboxCwd: ctx.sandboxRepoDir,
+                        sessionId: iterationResumeSession,
+                        handle: bindMountHandle,
+                      }),
+                    catch: (e) =>
+                      new SessionCaptureError({
+                        message: `Session resume failed: ${e instanceof Error ? e.message : String(e)}`,
+                        sessionId: iterationResumeSession,
+                      }),
+                  });
+                }
+
+                // Preprocess prompt (run !`command` expressions inside sandbox).
+                // Inline prompts pass through literally — skip expansion.
+                const fullPrompt = options.skipPromptExpansion
+                  ? prompt
+                  : yield* preprocessPrompt(
+                      prompt,
+                      ctx.sandbox,
+                      ctx.sandboxRepoDir,
+                    );
+
+                yield* display.status(label("Agent started"), "success");
+
+                // Invoke the agent — buffer text deltas so Pi's single-token
+                // chunks are displayed as readable multi-word lines.
+                const textBuffer = new TextDeltaBuffer((chunk) => {
+                  Effect.runPromise(display.textChunk(chunk));
+                  Effect.runPromise(
+                    streamEmitter.emit({
+                      type: "text",
+                      message: chunk,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                });
+                const onText = (text: string) => {
+                  textBuffer.write(text);
+                };
+                const onToolCall = (name: string, formattedArgs: string) => {
+                  textBuffer.flush();
+                  Effect.runPromise(display.toolCall(name, formattedArgs));
+                  Effect.runPromise(
+                    streamEmitter.emit({
+                      type: "toolCall",
+                      name,
+                      formattedArgs,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                };
+                const onRawLine = (line: string) => {
+                  Effect.runPromise(
+                    streamEmitter.emit({
+                      type: "raw",
+                      line,
+                      iteration: i,
+                      timestamp: new Date(),
+                    }),
+                  );
+                };
+                const onIdleWarning = (minutes: number) => {
+                  const msg =
+                    minutes === 1
+                      ? "Agent idle for 1 minute"
+                      : `Agent idle for ${minutes} minutes`;
+                  Effect.runPromise(display.status(label(msg), "warn"));
+                };
+                const onCompletionTimeout = (timeoutMs: number) => {
+                  Effect.runPromise(
+                    display.status(
+                      label(
+                        `Completion signal seen but agent process is hanging — force-completing after ${timeoutMs / 1000}s grace window.`,
+                      ),
+                      "warn",
+                    ),
+                  );
+                };
+                const {
+                  result: agentOutput,
+                  sessionId,
+                  usage: streamUsage,
+                  completionSignal: matchedSignal,
+                } = yield* invokeAgent(
+                  ctx.sandbox,
+                  ctx.sandboxRepoDir,
+                  fullPrompt,
+                  provider,
+                  idleTimeoutMs,
+                  completionTimeoutMs,
+                  completionSignals,
+                  onText,
+                  onToolCall,
+                  onRawLine,
+                  onIdleWarning,
+                  onCompletionTimeout,
+                  options._idleWarningIntervalMs,
+                  iterationResumeSession,
+                  iterationForkSession,
+                  options.signal,
+                );
+
+                // Flush any remaining buffered text deltas
+                textBuffer.dispose();
+
+                yield* display.status(label("Agent stopped"), "info");
+
+                // Capture session while sandbox is still alive. Usage from the
+                // stream (e.g. Codex's turn.completed) is the baseline; a
+                // session-parsed value below overrides it when available.
+                let sessionFilePath: string | undefined;
+                let usage: IterationUsage | undefined = streamUsage;
+                if (
+                  provider.captureSessions &&
+                  provider.sessionStorage &&
+                  sessionId &&
+                  bindMountHandle
+                ) {
+                  yield* display.status(label("Capturing session"), "info");
+                  yield* Effect.tryPromise({
+                    try: () =>
+                      provider.sessionStorage!.captureToHost({
+                        hostCwd: hostRepoDir,
+                        sandboxCwd: ctx.sandboxRepoDir,
+                        sessionId,
+                        handle: bindMountHandle,
+                      }),
+                    catch: (e) =>
+                      new SessionCaptureError({
+                        message: `Session capture failed: ${e instanceof Error ? e.message : String(e)}`,
+                        sessionId,
+                      }),
+                  });
+                  sessionFilePath = provider.sessionStorage.hostSessionFilePath(
+                    hostRepoDir,
+                    sessionId,
+                  );
+
+                  // Parse token usage from the captured session JSONL
+                  if (provider.parseSessionUsage) {
+                    const content = yield* Effect.promise(() =>
+                      provider
+                        .sessionStorage!.readHostSession(hostRepoDir, sessionId)
+                        .catch(() => undefined as string | undefined),
+                    );
+                    if (content) {
+                      const parsedUsage = provider.parseSessionUsage(content);
+                      if (parsedUsage) usage = parsedUsage;
+                    }
+                  }
+                }
+
+                // The completion signal comes from invokeAgent, which
+                // matched it against the parsed stream. Do not re-scan
+                // `agentOutput` here: it falls back to raw stdout, which
+                // carries the agent's echo of the prompt — and the prompt
+                // contains the signal, so re-scanning reports completion the
+                // agent never signalled.
+                return {
+                  completionSignal: matchedSignal,
+                  stdout: agentOutput,
+                  sessionId,
+                  sessionFilePath,
+                  usage,
+                } as const;
+              }),
+          ),
+      );
+      // Attach retry logic outside the factory.withSandbox call so the error
+      // type is visible. tapError logs before each retried attempt; retry
+      // re-runs the entire sandbox creation + agent invocation.
+      const sandboxResult = yield* iterationEffect.pipe(
+        Effect.tapError((e: SandboxError) => {
+          if (
+            retryAttempt >= maxRetries ||
+            (e._tag !== "AgentError" && e._tag !== "AgentIdleTimeoutError")
+          ) {
+            return Effect.void;
+          }
+          retryAttempt++;
+          const reason =
+            e._tag === "AgentIdleTimeoutError"
+              ? "Agent idle timeout"
+              : `Agent failed: ${e.message.split("\n")[0]}`;
+          return display.status(
+            label(
+              `${reason} (attempt ${retryAttempt}/${maxRetries + 1}). Retrying…`,
+            ),
+            "warn",
+          );
+        }),
+        Effect.retry({
+          while: (e: SandboxError) =>
+            (e._tag === "AgentError" || e._tag === "AgentIdleTimeoutError") &&
+            retryAttempt <= maxRetries,
+          times: maxRetries,
+          schedule: Schedule.exponential(Duration.millis(100), 2),
+        }),
+      );
+
+      const lifecycleResult = sandboxResult.value;
+      iterationPreservedPath = sandboxResult.preservedWorktreePath;
+
+      allCommits.push(...lifecycleResult.commits);
+      allStdout += lifecycleResult.result.stdout;
+      resolvedBranch = lifecycleResult.branch;
+
+      allIterations.push({
+        sessionId: lifecycleResult.result.sessionId,
+        sessionFilePath: lifecycleResult.result.sessionFilePath,
+        usage: lifecycleResult.result.usage,
+      });
+
+      if (lifecycleResult.result.completionSignal !== undefined) {
+        yield* display.status(
+          label(`Agent signaled completion after ${i} iteration(s).`),
+          "success",
+        );
+        return {
+          iterations: allIterations,
+          completionSignal: lifecycleResult.result.completionSignal,
+          stdout: allStdout,
+          commits: allCommits,
+          branch: resolvedBranch,
+          preservedWorktreePath: iterationPreservedPath,
+        };
+      }
+    }
+
+    yield* display.status(
+      label(`Reached max iterations (${iterations}).`),
+      "info",
+    );
+    return {
+      iterations: allIterations,
+      completionSignal: undefined,
+      stdout: allStdout,
+      commits: allCommits,
+      branch: resolvedBranch,
+      preservedWorktreePath: iterationPreservedPath,
+    };
+  });
+};

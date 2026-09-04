@@ -1,0 +1,69 @@
+---
+title: Agent Providers
+description: The AgentProvider interface and the bob agent built into Sandcastle.
+---
+
+## The `agent` option
+
+`run()`, `interactive()`, and `createSandbox().run()` all take an `agent: AgentProvider`:
+
+```typescript
+interface AgentProvider {
+  readonly name: string;
+  readonly env: Record<string, string>;
+  readonly captureSessions: boolean;
+  readonly sessionStorage?: AgentSessionStorage;
+  buildPrintCommand(options: AgentCommandOptions): { command: string; stdin?: string };
+  buildInteractiveArgs?(options: AgentCommandOptions): string[];
+  parseStreamLine(line: string): ParsedStreamEvent[];
+  parseSessionUsage?(content: string): IterationUsage | undefined;
+}
+```
+
+- **`buildPrintCommand`** builds the shell command run inside the sandbox for a non-interactive iteration. Returning `stdin` pipes the prompt to the child process's stdin instead of inlining it in argv (Linux caps a single argv entry around 128 KB).
+- **`buildInteractiveArgs`** (optional) builds an argv array for `interactive()` — required only if you call `interactive()` with this provider.
+- **`parseStreamLine`** parses one line of the agent's stdout into zero or more `ParsedStreamEvent`s: `text` (optionally `assertive: false` for reasoning/chain-of-thought output that should be shown but never matched against the completion signal), `tool_call`, `result`, `session_id`, or `usage`.
+- **`sessionStorage`** (optional) — implement this if the agent has a filesystem-backed session record Sandcastle can copy between host and sandbox. It unlocks `resumeSession`, `RunResult.resume()`/`.fork()`, and `Output`'s `maxRetries`. See `AgentSessionStorage` in `src/AgentProvider.ts` for the four methods it requires (`captureToHost`, `resumeIntoSandbox`, `readHostSession`, `existsOnHost`, `hostSessionFilePath`, `findByIdOnHost`).
+
+## `bob`
+
+The only agent provider Sandcastle ships. Wraps IBM's Bob-Shell CLI.
+
+```typescript
+import { bob } from "@ai-hero/sandcastle";
+
+bob(model: string, options?: {
+  env?: Record<string, string>;
+  model?: string;              // overrides the positional arg; rendered as --mode
+  setupScript?: string;        // shell snippet run before bob, e.g. to source nvm
+  maxTurns?: number;           // --max-turns
+  maxCost?: number;            // --max-cost (bobcoins)
+  disableToolGroups?: string[]; // --disable-tool-groups (read/edit/execute/mcp/skill/todo/subagent/mode)
+  disableMcp?: boolean;        // --disable-mcp
+  disableSubagents?: boolean;  // --disable-subagents
+  workspace?: string;          // --workspace
+  trust?: boolean;             // --trust, default true
+  acceptLicense?: boolean;     // --accept-license, default true
+}) // -> AgentProvider
+```
+
+Requires `BOB_API_KEY` in the environment (`.sandcastle/.env`). `trust`/`acceptLicense` default to `true` because a headless run has no one to answer bob's first-run trust/license prompt — an unanswered prompt would otherwise hang until the idle timeout. `interactive()` omits both so a human at the terminal sees and answers them.
+
+`buildPrintCommand` renders a shell one-liner: an optional `setupScript`, then an `if ! type bob` auto-install check (`curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash`), a `PATH` rehash for npm's global bin dir, then `bob run --format stream-json <flags>` with the prompt piped via stdin.
+
+`parseStreamLine` parses NDJSON from `bob run --format stream-json`:
+
+| Event | Handling |
+| --- | --- |
+| `{"type":"message","role":"assistant","content",...}` | `isReasoning: true` → `text` event with `assertive: false`. Otherwise a plain `text` event. Any non-`assistant` role is dropped (bob echoing the prompt back). |
+| `{"type":"tool_use", ...}` / `{"type":"tool_result", ...}` | Mapped to `tool_call` events. |
+| `{"type":"error", ...}` | Mapped to a `tool_call` event, not `text` — never eligible for completion-signal matching. |
+| `{"type":"result","status":"success", ...}` | Emits `text` + `result` + usage/session-id (best-effort, from `stats`) when `last_message` is present. On a clean exit with no message, emits only usage/session-id — a bare exit is never treated as a completion signal. |
+| `{"type":"result","status":"error", ...}` | Routed through `tool_call`; the run's actual failure is driven by the process exit code. |
+| Non-JSON line | Treated as plain `text`. |
+
+`bob` has `captureSessions: false` and no `sessionStorage` — its session model is a remote task id (`--resume <task-id>`), not a file Sandcastle can copy. `resumeSession` is still wired through to `--resume` in `buildPrintCommand`, but nothing in the shipped provider sets it, since that requires `sessionStorage`. In practice this means `.resume()`/`.fork()`, `resumeSession`, and `output.maxRetries` are real, wired features with no currently-shipped provider that can use them.
+
+## Writing a custom provider
+
+Implement the `AgentProvider` interface directly — there's no factory helper, unlike sandbox providers. `src/agents/bob.ts` is the reference implementation.

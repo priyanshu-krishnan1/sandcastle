@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package agentd.v1;
+
+option go_package = "github.com/ai-hero/sandcastle/agentd/gen/agentd/v1;agentdv1";
+
+// AgentDaemon replaces per-exec SSH spawning (src/sandboxes/fyre.ts) with one
+// persistent, multiplexed connection per remote host. See
+// docs/adr/0024-daemon-transport-for-fyre.md for the decision this implements.
+service AgentDaemon {
+  // Non-interactive command execution. Server-streaming: one ExecEvent per
+  // output line, then a terminal ExitResult. The client closing its side of
+  // the stream (or the RPC context being cancelled) is the cancellation
+  // signal — the daemon kills the command's whole process group in response.
+  rpc Exec(ExecRequest) returns (stream ExecEvent);
+
+  // Interactive/PTY execution. Bidirectional: the client streams stdin bytes
+  // and resize events, the server streams stdout/stderr and the exit code.
+  rpc InteractiveExec(stream InteractiveExecClientMsg)
+      returns (stream InteractiveExecServerMsg);
+
+  // Host -> sandbox file/directory transfer. Client-streaming: one header
+  // message, then chunked bytes; one response carrying the integrity result.
+  rpc CopyIn(stream CopyInChunk) returns (CopyInResult);
+
+  // Sandbox -> host file/directory transfer. Server-streaming: one header,
+  // then chunked bytes, then a trailer carrying the checksum to verify.
+  rpc CopyOut(CopyOutRequest) returns (stream CopyOutChunk);
+
+  // Point-in-time daemon load/health snapshot. Not consumed by any
+  // control-plane component today — see ADR-0024, "what we chose not to
+  // build". Exists so a future consumer wouldn't force a wire-format change.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// ---- Exec ----
+
+message ExecRequest {
+  // Client-generated UUID, for daemon-side logging/correlation only.
+  string exec_id = 1;
+  // A single shell string, run as `sh -c command` — never split into argv,
+  // so the remote shell interprets quoting/flags exactly as fyre.ts's
+  // remoteExec does today.
+  string command = 2;
+  // Empty means the daemon's configured default (the sandbox worktree root).
+  string cwd = 3;
+  // When true, the daemon prefixes `sudo -n `. Requires passwordless sudo,
+  // the same operational assumption fyre.ts already carries.
+  bool sudo = 4;
+  map<string, string> env = 5;
+  // Written to the child's stdin and closed — write-once, not a stream,
+  // mirroring SandboxHandle.exec's `stdin?: string` (used to dodge the
+  // Linux 128KB argv limit for large prompts).
+  optional string stdin = 6;
+}
+
+message ExecEvent {
+  oneof event {
+    LineOutput stdout_line = 1;
+    LineOutput stderr_line = 2;
+    // Terminal message; the stream closes after this.
+    ExitResult exit = 3;
+  }
+}
+
+message LineOutput {
+  string line = 1;
+  // Monotonic per-stream sequence number, for detecting drops/reordering in
+  // tests.
+  int64 seq = 2;
+}
+
+message ExitResult {
+  int32 exit_code = 1;
+}
+
+// ---- InteractiveExec ----
+
+message InteractiveExecClientMsg {
+  oneof msg {
+    // First message on the stream, exactly once.
+    InteractiveExecStart start = 1;
+    bytes stdin_chunk = 2;
+    TerminalResize resize = 3;
+    // Client's stdin stream ended (EOF).
+    bool close_stdin = 4;
+  }
+}
+
+message InteractiveExecStart {
+  repeated string args = 1;
+  string cwd = 2;
+  map<string, string> env = 3;
+  bool sudo = 4;
+  // Set from stdin.isTTY on the client, the same detection point documented
+  // on SandboxHandle.interactiveExec today.
+  bool pty = 5;
+  // Ignored when pty is false.
+  TerminalSize initial_size = 6;
+}
+
+message TerminalSize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message TerminalResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message InteractiveExecServerMsg {
+  oneof msg {
+    // When pty=true this carries the merged pty output (stderr_chunk is
+    // unused in that mode — a pty has one fd).
+    bytes stdout_chunk = 1;
+    bytes stderr_chunk = 2;
+    ExitResult exit = 3;
+  }
+}
+
+// ---- File transfer ----
+
+message CopyInChunk {
+  oneof msg {
+    // First message.
+    CopyInHeader header = 1;
+    // Subsequent messages.
+    bytes data = 2;
+  }
+}
+
+message CopyInHeader {
+  string sandbox_path = 1;
+  // True: `data` chunks are a tar.gz stream, extracted server-side —
+  // mirrors fyre.ts's own tar-based directory transfer, so permissions and
+  // symlinks behave identically to today's SCP-based path.
+  bool is_directory = 2;
+  // Computed client-side over the full payload before sending.
+  string sha256 = 3;
+  int64 size = 4;
+}
+
+message CopyInResult {
+  bool ok = 1;
+  // Set when ok is false (integrity mismatch, extract failure, etc).
+  string error = 2;
+}
+
+message CopyOutRequest {
+  string sandbox_path = 1;
+}
+
+message CopyOutChunk {
+  oneof msg {
+    // First message.
+    CopyOutHeader header = 1;
+    bytes data = 2;
+    // Last message, carries the checksum for the client to verify.
+    CopyOutTrailer trailer = 3;
+  }
+}
+
+message CopyOutHeader {
+  int64 size = 1;
+}
+
+message CopyOutTrailer {
+  string sha256 = 1;
+}
+
+// ---- Health ----
+
+message HealthRequest {}
+
+message HealthResponse {
+  int32 active_exec_count = 1;
+  int32 active_interactive_count = 2;
+  // Reserved; the daemon does not queue in v1 — always 0. Present so a
+  // future control-plane reader (not built here — see ADR-0024) doesn't
+  // need a wire-format bump later.
+  int32 queue_depth = 3;
+  double load1 = 4;
+  uint64 uptime_seconds = 5;
+  string daemon_version = 6;
+}

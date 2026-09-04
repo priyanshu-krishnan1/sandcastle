@@ -18,6 +18,10 @@
       "import": "./dist/sandboxes/no-sandbox.js",
       "types": "./dist/sandboxes/no-sandbox.d.ts"
     },
+    "./sandboxes/remoteDaemon": {
+      "import": "./dist/sandboxes/remoteDaemon.js",
+      "types": "./dist/sandboxes/remoteDaemon.d.ts"
+    },
     "./agents/bob": {
       "import": "./dist/agents/bob.js",
       "types": "./dist/agents/bob.d.ts"
@@ -28,9 +32,10 @@
   },
   "scripts": {
     "build": "tsup",
-    "postbuild": "rm -rf dist/templates && cp -r src/templates dist/templates && node scripts/check-public-types-effect-free.mjs",
+    "postbuild": "rm -rf dist/templates && cp -r src/init/templates dist/templates && node scripts/check-public-types-effect-free.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsgo --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
@@ -62,6 +67,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^15.5.1",
     "prettier": "^3.5.3",
+    "ts-proto": "^2.12.1",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3",
@@ -69,7 +75,9 @@
     "zod": "^4.4.3"
   },
   "dependencies": {
-    "@clack/prompts": "^1.1.0"
+    "@bufbuild/protobuf": "^2.14.1",
+    "@clack/prompts": "^1.1.0",
+    "@grpc/grpc-js": "^1.14.4"
   },
   "peerDependencies": {
     "@daytona/sdk": "^0.164.0",
